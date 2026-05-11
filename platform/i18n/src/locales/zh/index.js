@@ -24,6 +24,7 @@ import CaptureViewportModal from './CaptureViewportModal.json';
 import Hps from './Hps.json';
 import ToolbarLayoutSelector from './ToolbarLayoutSelector.json';
 import Tools from './Tools.json';
+import LungCtCompare from './LungCtCompare.json';
 
 export default {
   zh: {
@@ -53,5 +54,6 @@ export default {
     Hps,
     ToolbarLayoutSelector,
     Tools,
+    LungCtCompare,
   },
 };

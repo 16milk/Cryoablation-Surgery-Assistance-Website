@@ -1,0 +1,44 @@
+{
+  "name": "@ohif/extension-lung-ct-compare",
+  "version": "3.13.0-beta.71",
+  "description": "Lung CT dual-stack + 3D layout (registration compare UI)",
+  "author": "OHIF Contributors",
+  "license": "MIT",
+  "repository": "OHIF/Viewers",
+  "main": "dist/ohif-extension-lung-ct-compare.umd.js",
+  "module": "src/index.tsx",
+  "engines": {
+    "node": ">=14",
+    "npm": ">=6",
+    "yarn": ">=1.16.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "shx rm -rf dist",
+    "clean:deep": "yarn run clean && shx rm -rf node_modules",
+    "dev": "cross-env NODE_ENV=development webpack --config .webpack/webpack.dev.js --watch --output-pathinfo",
+    "build": "cross-env NODE_ENV=production webpack --config .webpack/webpack.prod.js",
+    "build:package-1": "yarn run build",
+    "start": "yarn run dev",
+    "test:unit": "jest --watchAll",
+    "test:unit:ci": "jest --ci --runInBand --collectCoverage --passWithNoTests"
+  },
+  "peerDependencies": {
+    "@cornerstonejs/core": "4.22.3",
+    "@ohif/core": "3.13.0-beta.71",
+    "@ohif/ui-next": "3.13.0-beta.71",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-i18next": "12.3.1",
+    "react-router-dom": "6.30.3"
+  },
+  "dependencies": {
+    "@babel/runtime": "7.28.2"
+  }
+}

@@ -19,7 +19,7 @@ if (window.location.search === '?today') {
 window.config = {
   routerBasename: null,
   extensions: [],
-  modes: ['@ohif/mode-test'],
+  modes: ['@ohif/mode-test', '@ohif/mode-lung-ct-compare'],
   showStudyList: true,
   // below flag is for performance reasons, but it might not work for all servers
   maxNumberOfWebWorkers: 3,
