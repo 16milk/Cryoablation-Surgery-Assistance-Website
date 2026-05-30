@@ -120,6 +120,9 @@ export default function LungComparePanel() {
     iceBall: false,
   });
 
+  /** Structure currently armed for click-to-prompt segmentation (null = off). */
+  const [clickTarget, setClickTarget] = useState<LungStructureId | null>(null);
+
   /** Re-render when display sets load or metadata updates so CT filters see numImageFrames etc. */
   const [, setDisplaySetsRev] = useState(0);
   useEffect(() => {
@@ -492,6 +495,57 @@ export default function LungComparePanel() {
     [baselineUid, compareUid, servicesManager, commandsManager]
   );
 
+  /**
+   * Arm/disarm click-to-prompt for a structure. While armed, clicking a CT
+   * runs a point-prompted segmentation (MedSAM2, or a local fallback) for that
+   * lesion. Selecting a target forces its overlay visible.
+   */
+  const toggleClickTarget = useCallback(
+    (structureId: LungStructureId) => {
+      const provider = getLungSegmentationProvider();
+      setClickTarget(prev => {
+        if (prev === structureId) {
+          provider.disableClickPrompt?.();
+          return null;
+        }
+        setActiveStructures(s => ({ ...s, [structureId]: true }));
+        try {
+          provider.enableClickPrompt?.(
+            structureId,
+            [LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT],
+            servicesManager
+          );
+        } catch (e) {
+          console.warn('lung-ct-compare: enable click prompt failed', e);
+        }
+        return structureId;
+      });
+    },
+    [servicesManager]
+  );
+
+  const clearClicks = useCallback(() => {
+    if (!clickTarget) {
+      return;
+    }
+    try {
+      getLungSegmentationProvider().clearClickPrompt?.(clickTarget);
+    } catch (e) {
+      console.warn('lung-ct-compare: clear click prompt failed', e);
+    }
+  }, [clickTarget]);
+
+  /** Detach click listeners when the panel unmounts (e.g. leaving the mode). */
+  useEffect(() => {
+    return () => {
+      try {
+        getLungSegmentationProvider().disableClickPrompt?.();
+      } catch {
+        /* provider already torn down */
+      }
+    };
+  }, []);
+
   const swapSides = useCallback(() => {
     if (!baselineUid || !compareUid || baselineUid === compareUid) {
       return;
@@ -720,6 +774,49 @@ export default function LungComparePanel() {
           })}
         </div>
         <p className="text-muted-foreground text-xs leading-snug">{t('segmentationHelp')}</p>
+      </div>
+
+      <div
+        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        data-cy="lung-compare-click-prompt"
+      >
+        <Label className="text-xs text-muted-foreground">{t('clickPromptLabel')}</Label>
+        <div className="grid grid-cols-2 gap-2">
+          {LUNG_STRUCTURES.filter(s => s.id === 'nodule' || s.id === 'iceBall').map(structure => {
+            const active = clickTarget === structure.id;
+            return (
+              <Button
+                key={structure.id}
+                type="button"
+                variant={active ? 'default' : 'outline'}
+                size="sm"
+                dataCY={`lung-click-${structure.id}`}
+                aria-pressed={active}
+                className="justify-start gap-2"
+                onClick={() => toggleClickTarget(structure.id)}
+              >
+                <span
+                  className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/30"
+                  style={{ backgroundColor: structure.colorHex }}
+                  aria-hidden="true"
+                />
+                {t(structure.labelKey)}
+              </Button>
+            );
+          })}
+        </div>
+        {clickTarget && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            dataCY="lung-click-clear"
+            onClick={clearClicks}
+          >
+            {t('clickPromptClear')}
+          </Button>
+        )}
+        <p className="text-muted-foreground text-xs leading-snug">{t('clickPromptHelp')}</p>
       </div>
 
       <div className="flex flex-col gap-1 border-t border-secondary-light pt-2">

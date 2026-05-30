@@ -90,6 +90,23 @@ export interface LungSegmentationProvider {
    * a structure yet (the panel may surface this to the user). Defaults to true.
    */
   isAvailable?(structureId: LungStructureId): boolean;
+
+  /**
+   * Optional click-to-prompt support. When a target structure is enabled,
+   * clicking a viewport runs a point-prompted segmentation (e.g. MedSAM2) for
+   * that lesion at the clicked location and adds it to the overlay.
+   */
+  enableClickPrompt?(
+    structureId: LungStructureId,
+    viewportIds: string[],
+    servicesManager: ServicesManager
+  ): void;
+  /** Disable click-to-prompt and detach listeners. */
+  disableClickPrompt?(): void;
+  /** Clear the click-prompted masks for a structure (reverts to auto-detection). */
+  clearClickPrompt?(structureId: LungStructureId): void;
+  /** Whether click-to-prompt is meaningful for a structure (compact lesions). */
+  supportsClickPrompt?(structureId: LungStructureId): boolean;
 }
 
 /**

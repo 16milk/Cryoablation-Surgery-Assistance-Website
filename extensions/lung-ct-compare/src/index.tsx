@@ -21,6 +21,11 @@ export {
 } from './segmentation/thresholdSegmentationProvider';
 
 export {
+  registerMedSam2LungSegmentation,
+  unregisterMedSam2LungSegmentation,
+} from './segmentation/medSam2SegmentationProvider';
+
+export {
   mockIdentityDeformationField,
   createConstantDeformationField,
   getLungDeformationField,

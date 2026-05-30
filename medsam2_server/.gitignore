@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+# Model weights are large — keep them out of git.
+*.pt
+*.pth
+checkpoints/
+weights/

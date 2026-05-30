@@ -159,6 +159,13 @@ module.exports = (env, argv) => {
           target: 'http://localhost:5100',
           changeOrigin: true,
         },
+        {
+          // MedSAM2 inference microservice (lung-ct-compare segmentation).
+          context: ['/medsam2'],
+          target: process.env.MEDSAM2_TARGET || 'http://localhost:5200',
+          changeOrigin: true,
+          pathRewrite: { '^/medsam2': '' },
+        },
       ],
       static: [
         {

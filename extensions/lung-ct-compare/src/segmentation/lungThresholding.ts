@@ -1,4 +1,7 @@
 import type { LungStructureId } from './lungSegmentation';
+import { computeVesselness } from './vesselness';
+import { computeBlobness } from './blobness';
+import { close, connectedComponents, fillHoles, keepComponents, open } from './morphology';
 
 /**
  * Pure (DOM-free) HU thresholding used by the threshold segmentation provider.
@@ -29,6 +32,46 @@ export const HU_RANGES: Record<Exclude<LungStructureId, 'lungParenchyma'>, [numb
   nodule: [-120, 60],
   vessel: [60, 600],
 };
+
+/**
+ * Vessel detection tuning. Vessels are found with a Hessian vesselness filter
+ * (see vesselness.ts) rather than a flat HU band:
+ *  - `VESSEL_RESPONSE_MIN`: minimum normalized vesselness [0,1] to accept.
+ *  - `VESSEL_HU_FLOOR`: voxels below this HU are aerated parenchyma, never vessel
+ *    (removes faint filter responses inside the lung background).
+ */
+const VESSEL_RESPONSE_MIN = 0.12;
+const VESSEL_HU_FLOOR = -720;
+
+/**
+ * Nodule detection tuning. Nodules are found with a Hessian blobness filter
+ * (see blobness.ts) plus connected-component shape/size gating, instead of a
+ * flat HU band (which mostly captured vessel cross-sections and noise):
+ *  - `NODULE_RESPONSE_MIN`: minimum normalized blobness [0,1].
+ *  - `NODULE_HU_LO/HI`: plausible nodule attenuation window (soft tissue),
+ *    excluding aerated lung and dense bone/calcification extremes.
+ *  - `NODULE_AREA_MIN/MAX`: per-slice cross-section area (px) of a real nodule.
+ *  - `NODULE_FILL_MIN`: area / bounding-box area; rejects sparse/elongated bits.
+ *  - `NODULE_ASPECT_MAX`: bounding-box aspect ratio; rejects vessel segments.
+ */
+const NODULE_RESPONSE_MIN = 0.25;
+const NODULE_HU_LO = -250;
+const NODULE_HU_HI = 200;
+const NODULE_AREA_MIN = 6;
+const NODULE_AREA_MAX = 1200;
+const NODULE_FILL_MIN = 0.45;
+const NODULE_ASPECT_MAX = 3;
+
+/**
+ * Ice-ball detection tuning. The cryoablation ice ball is a large, smooth,
+ * homogeneous hypodense mass, so we band-threshold then consolidate it into a
+ * single clean blob with morphology + a minimum-area filter (instead of leaving
+ * the band as scattered pixels):
+ *  - `ICEBALL_CLOSE_R`: closing radius (px) to bridge gaps / smooth the margin.
+ *  - `ICEBALL_AREA_MIN`: minimum component area (px); drops small band speckle.
+ */
+const ICEBALL_CLOSE_R = 2;
+const ICEBALL_AREA_MIN = 150;
 
 /** Below this HU a voxel is considered air (lung air space or outside the body). */
 const AIR_HU = -400;
@@ -175,14 +218,111 @@ export function computeStructureMask(
     return field.interiorAir;
   }
 
+  const region = field.lungRegion;
+
+  if (structureId === 'vessel') {
+    return computeVesselMask(hu, region, width, height);
+  }
+  if (structureId === 'nodule') {
+    return computeNoduleMask(hu, region, width, height);
+  }
+  if (structureId === 'iceBall') {
+    return computeIceBallMask(hu, region, width, height);
+  }
+
+  // All structures are handled above; defensive empty mask for completeness.
+  return new Uint8Array(width * height);
+}
+
+/**
+ * Vessel mask = strong vesselness response, confined to the lung field and
+ * above the aerated-parenchyma HU floor. Produces the branching vessel tree
+ * instead of the broad soft-tissue band the old HU threshold captured.
+ */
+export function computeVesselMask(
+  hu: Float32Array,
+  region: Uint8Array,
+  width: number,
+  height: number
+): Uint8Array {
   const n = width * height;
   const out = new Uint8Array(n);
-  const [lower, upper] = HU_RANGES[structureId];
-  const region = field.lungRegion;
+  const vesselness = computeVesselness(hu, width, height, region);
   for (let i = 0; i < n; i++) {
-    if (region[i] && hu[i] >= lower && hu[i] < upper) {
+    if (region[i] && vesselness[i] >= VESSEL_RESPONSE_MIN && hu[i] > VESSEL_HU_FLOOR) {
       out[i] = 1;
     }
   }
   return out;
+}
+
+/**
+ * Nodule mask = compact, blob-shaped soft-tissue lesions in the lung. A Hessian
+ * blobness response (within an HU window) yields candidates; an opening removes
+ * specks, and connected components are kept only when their size and shape look
+ * like a nodule cross-section (rejecting elongated vessel segments).
+ *
+ * Note: on a single 2D slice a vessel seen end-on also looks like a blob, so
+ * some false positives are unavoidable without 3D context — MedSAM2 (with a box
+ * prompt seeded from this mask) or a user click refines these further.
+ */
+export function computeNoduleMask(
+  hu: Float32Array,
+  region: Uint8Array,
+  width: number,
+  height: number
+): Uint8Array {
+  const n = width * height;
+  const blobness = computeBlobness(hu, width, height, region);
+
+  const candidate = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (
+      region[i] &&
+      blobness[i] >= NODULE_RESPONSE_MIN &&
+      hu[i] > NODULE_HU_LO &&
+      hu[i] < NODULE_HU_HI
+    ) {
+      candidate[i] = 1;
+    }
+  }
+
+  const cleaned = open(candidate, width, height, 1);
+  const cc = connectedComponents(cleaned, width, height);
+  return keepComponents(cc, width, height, (_label, area, [minX, minY, maxX, maxY]) => {
+    if (area < NODULE_AREA_MIN || area > NODULE_AREA_MAX) {
+      return false;
+    }
+    const bw = maxX - minX + 1;
+    const bh = maxY - minY + 1;
+    const fill = area / (bw * bh);
+    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
+    return fill >= NODULE_FILL_MIN && aspect <= NODULE_ASPECT_MAX;
+  });
+}
+
+/**
+ * Ice-ball mask = the large hypodense cryoablation mass. The HU band is closed
+ * (to bridge gaps and smooth the margin), holes are filled, and only components
+ * above a minimum area are kept, so the result is the ice ball as one clean blob
+ * rather than scattered band pixels.
+ */
+export function computeIceBallMask(
+  hu: Float32Array,
+  region: Uint8Array,
+  width: number,
+  height: number
+): Uint8Array {
+  const n = width * height;
+  const [lower, upper] = HU_RANGES.iceBall;
+  const band = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (region[i] && hu[i] >= lower && hu[i] < upper) {
+      band[i] = 1;
+    }
+  }
+
+  const consolidated = fillHoles(close(band, width, height, ICEBALL_CLOSE_R), width, height);
+  const cc = connectedComponents(consolidated, width, height);
+  return keepComponents(cc, width, height, (_label, area) => area >= ICEBALL_AREA_MIN);
 }

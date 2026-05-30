@@ -2,8 +2,8 @@ import update from 'immutability-helper';
 import i18n from 'i18next';
 import { ToolbarService, utils } from '@ohif/core';
 import {
-  registerThresholdLungSegmentation,
-  unregisterThresholdLungSegmentation,
+  registerMedSam2LungSegmentation,
+  unregisterMedSam2LungSegmentation,
 } from '@ohif/extension-lung-ct-compare';
 import { id } from './id';
 import initToolGroups from '../../basic/src/initToolGroups';
@@ -59,9 +59,10 @@ export function onModeEnter({ servicesManager, extensionManager, commandsManager
   measurementService.clearMeasurements();
   initToolGroups(extensionManager, toolGroupService, commandsManager);
 
-  // Activate the real HU-threshold segmentation backend for the structure
-  // toggle buttons (lung parenchyma / vessel / nodule / ice ball).
-  registerThresholdLungSegmentation();
+  // Activate the MedSAM2-backed segmentation for the structure toggle buttons
+  // (lung parenchyma / vessel / nodule / ice ball). It automatically falls back
+  // to in-browser HU thresholds when the MedSAM2 service is not running.
+  registerMedSam2LungSegmentation();
 
   toolbarService.register(toolbarButtons);
 
@@ -112,7 +113,7 @@ export function onModeExit({ servicesManager }: withAppTypes) {
     uiModalService,
   } = servicesManager.services;
 
-  unregisterThresholdLungSegmentation();
+  unregisterMedSam2LungSegmentation();
 
   uiDialogService.hideAll();
   uiModalService.hide();
