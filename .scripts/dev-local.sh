@@ -14,12 +14,27 @@ echo "  Backend:  http://localhost:5100"
 echo "  Frontend: http://localhost:3000"
 echo ""
 
-# Start server in background
-(cd "$ROOT/server" && node index.js) &
-SERVER_PID=$!
+# Start server in background with an auto-restart loop, so that if the backend
+# ever exits (crash, OOM, etc.) it comes back instead of leaving the frontend
+# stuck on ECONNREFUSED. Logs are mirrored to server/data/server.log for
+# post-mortem debugging.
+SERVER_LOG="$ROOT/server/data/server.log"
+mkdir -p "$ROOT/server/data"
+
+(
+  while true; do
+    echo "[dev-local] starting backend (node index.js) at $(date)" | tee -a "$SERVER_LOG"
+    (cd "$ROOT/server" && node index.js) 2>&1 | tee -a "$SERVER_LOG"
+    echo "[dev-local] backend exited (code $?). Restarting in 1s..." | tee -a "$SERVER_LOG"
+    sleep 1
+  done
+) &
+SERVER_LOOP_PID=$!
 
 cleanup() {
-  kill "$SERVER_PID" 2>/dev/null || true
+  # Kill the restart loop and any node server it spawned.
+  kill "$SERVER_LOOP_PID" 2>/dev/null || true
+  pkill -f "$ROOT/server/index.js" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

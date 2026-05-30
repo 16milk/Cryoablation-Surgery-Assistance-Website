@@ -148,14 +148,16 @@ function extractPixelDataFrame(buffer) {
     ? buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
     : buffer;
 
-  const dicomDict = dcmjs.data.DicomMessage.readFile(arrayBuffer);
-  const dataset = naturalizeDataset(dicomDict.dict);
-
-  const rows = dataset.Rows || 0;
-  const cols = dataset.Columns || 0;
-  const bitsAllocated = dataset.BitsAllocated || 16;
-  const pixelRepresentation = dataset.PixelRepresentation || 0;
-  const numFrames = parseInt(dataset.NumberOfFrames || '1', 10);
+  let dataset;
+  try {
+    const dicomDict = dcmjs.data.DicomMessage.readFile(arrayBuffer);
+    dataset = naturalizeDataset(dicomDict.dict);
+  } catch (err) {
+    // Unparseable / unsupported transfer syntax: let the caller fall back to
+    // returning the raw .dcm file rather than crashing the request.
+    console.error('extractPixelDataFrame parse failed, falling back to raw file:', err.message);
+    return null;
+  }
 
   if (!dataset.PixelData) {
     return null;
