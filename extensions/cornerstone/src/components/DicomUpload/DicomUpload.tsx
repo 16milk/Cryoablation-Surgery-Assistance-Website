@@ -51,7 +51,7 @@ function DicomUpload({ dataSource, onComplete, onStarted }: DicomUploadProps): R
                       disabled={false}
                       onClick={() => {}}
                     >
-                      {'Add files'}
+                      {'选择文件'}
                       <input
                         {...getInputProps()}
                         style={{ display: 'none' }}
@@ -72,7 +72,7 @@ function DicomUpload({ dataSource, onComplete, onStarted }: DicomUploadProps): R
                       disabled={false}
                       onClick={() => {}}
                     >
-                      {'Add folder'}
+                      {'选择文件夹'}
                       <input
                         {...getInputProps()}
                         webkitdirectory="true"

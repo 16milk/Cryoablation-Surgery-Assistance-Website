@@ -31,29 +31,30 @@ const StudyListFilter = ({
   return (
     <React.Fragment>
       <div>
-        <div className="bg-black">
-          <div className="container relative mx-auto flex flex-col pt-5">
-            <div className="mb-5 flex flex-row justify-between">
-              <div className="flex min-w-[1px] shrink flex-row items-center gap-6">
+        <div className="bg-bkg-med">
+          <div className="container relative mx-auto flex flex-col px-4 pt-6 pb-2">
+            <div className="mb-4 flex flex-row items-center justify-between">
+              <div className="flex min-w-[1px] shrink flex-row items-center gap-5">
                 <Typography
                   variant="h6"
-                  className="text-white"
+                  className="text-common-main text-xl font-semibold tracking-tight"
                 >
                   {t('StudyList')}
                 </Typography>
                 {getDataSourceConfigurationComponent && getDataSourceConfigurationComponent()}
                 {onUploadClick && (
-                  <div
-                    className="text-primary-active flex cursor-pointer items-center gap-2 self-center text-lg font-semibold"
+                  <button
+                    type="button"
+                    className="bg-actions-primary hover:bg-customgreen-200 flex cursor-pointer items-center gap-2 self-center rounded-lg px-5 py-2.5 text-base font-semibold text-white shadow-md transition-colors duration-200"
                     onClick={onUploadClick}
+                    data-cy="add-data-button"
                   >
-                    <Icons.Upload />
-                    <span>{t('Upload')}</span>
-                  </div>
+                    <Icons.Upload className="h-5 w-5" />
+                    <span>{t('AddData')}</span>
+                  </button>
                 )}
               </div>
               <div className="flex h-[34px] flex-row items-center">
-                {/* TODO revisit the completely rounded style of button used for clearing the study list filter - for now use LegacyButton*/}
                 {isFiltering && (
                   <LegacyButton
                     rounded="full"
@@ -70,7 +71,7 @@ const StudyListFilter = ({
 
                 <Typography
                   variant="h6"
-                  className="mr-2"
+                  className="text-common-main mr-2"
                   data-cy={'num-studies'}
                 >
                   {numOfStudies > 100 ? '>100' : numOfStudies}
@@ -79,15 +80,15 @@ const StudyListFilter = ({
                   variant="h6"
                   className="text-primary-light"
                 >
-                  {`${t('Studies')} `}
+                  {`${t('Studies')} `}
                 </Typography>
               </div>
             </div>
           </div>
         </div>
       </div>
-      <div className="sticky -top-1 z-10 mx-auto border-b-4 border-black">
-        <div className="bg-primary-dark pt-3 pb-3">
+      <div className="border-bkg-full sticky -top-1 z-10 mx-auto border-b-4">
+        <div className="bg-secondary-dark pt-3 pb-3">
           <InputGroup
             inputMeta={filtersMeta}
             values={filterValues}

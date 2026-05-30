@@ -1,0 +1,4 @@
+node_modules/
+data/dicom/
+data/*.db
+data/*.db-*
