@@ -1,6 +1,10 @@
 import update from 'immutability-helper';
 import i18n from 'i18next';
 import { ToolbarService, utils } from '@ohif/core';
+import {
+  registerThresholdLungSegmentation,
+  unregisterThresholdLungSegmentation,
+} from '@ohif/extension-lung-ct-compare';
 import { id } from './id';
 import initToolGroups from '../../basic/src/initToolGroups';
 import toolbarButtons from '../../basic/src/toolbarButtons';
@@ -55,6 +59,10 @@ export function onModeEnter({ servicesManager, extensionManager, commandsManager
   measurementService.clearMeasurements();
   initToolGroups(extensionManager, toolGroupService, commandsManager);
 
+  // Activate the real HU-threshold segmentation backend for the structure
+  // toggle buttons (lung parenchyma / vessel / nodule / ice ball).
+  registerThresholdLungSegmentation();
+
   toolbarService.register(toolbarButtons);
 
   toolbarService.updateSection(TOOLBAR_SECTIONS.primary, [
@@ -103,6 +111,8 @@ export function onModeExit({ servicesManager }: withAppTypes) {
     uiDialogService,
     uiModalService,
   } = servicesManager.services;
+
+  unregisterThresholdLungSegmentation();
 
   uiDialogService.hideAll();
   uiModalService.hide();

@@ -20,7 +20,7 @@
   "segNodule": "Nodule",
   "segVessel": "Vessel",
   "segIceBall": "Ice ball",
-  "segmentationHelp": "Toggle a colored overlay of each structure on both CT viewports; click again to hide. The segmentation algorithm is not wired up yet — the buttons expose the interface for later insertion.",
+  "segmentationHelp": "Toggle a colored overlay of each structure on both CT viewports; click again to hide. Computed in-browser from the current slice's HU thresholds and updated as you scroll. Lung parenchyma and vessels are fairly accurate; nodule and ice ball are approximate.",
   "baselineLabel": "Baseline (left)",
   "compareLabel": "Compare (right)",
   "selectSeriesPlaceholder": "Select CT series",

@@ -31,6 +31,7 @@
   },
   "peerDependencies": {
     "@cornerstonejs/core": "4.22.3",
+    "@cornerstonejs/tools": "4.22.3",
     "@ohif/core": "3.13.0-beta.71",
     "@ohif/ui-next": "3.13.0-beta.71",
     "react": "18.3.1",

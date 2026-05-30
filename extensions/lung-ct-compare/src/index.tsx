@@ -16,6 +16,11 @@ export type {
 } from './segmentation/lungSegmentation';
 
 export {
+  registerThresholdLungSegmentation,
+  unregisterThresholdLungSegmentation,
+} from './segmentation/thresholdSegmentationProvider';
+
+export {
   mockIdentityDeformationField,
   createConstantDeformationField,
   getLungDeformationField,

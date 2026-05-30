@@ -20,7 +20,7 @@
   "segNodule": "结节",
   "segVessel": "血管",
   "segIceBall": "冰球",
-  "segmentationHelp": "点击按钮在两侧 CT 上以对应颜色叠加显示该结构，再次点击取消。分割算法尚未接入，按钮已预留接口。",
+  "segmentationHelp": "点击按钮在两侧 CT 上以对应颜色叠加显示该结构，再次点击取消。基于当前层 HU 阈值在浏览器内实时计算，滚动时自动更新；肺实质、血管较准确，结节、冰球为近似估计。",
   "baselineLabel": "基准侧（左）",
   "compareLabel": "对比侧（右）",
   "selectSeriesPlaceholder": "选择 CT 序列",
