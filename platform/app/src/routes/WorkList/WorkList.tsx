@@ -47,6 +47,98 @@ const { sortBySeriesDate } = utils;
 const seriesInStudiesMap = new Map();
 
 /**
+ * Upload local DICOM files into a specific existing study entry on the local
+ * SQLite backend. Each file's raw bytes are POSTed and force-merged into the
+ * given study (see server /api/studies/:studyUID/instances). Runs with limited
+ * concurrency to avoid overwhelming the dev proxy on large folders.
+ */
+async function uploadFilesToStudy(studyInstanceUid, files, onProgress) {
+  const fileList = Array.from(files);
+  const total = fileList.length;
+  const concurrency = Math.min(6, total);
+  let done = 0;
+  let failed = 0;
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < fileList.length) {
+      const file = fileList[cursor++];
+      try {
+        const body = await file.arrayBuffer();
+        const resp = await fetch(
+          `/api/studies/${encodeURIComponent(studyInstanceUid)}/instances`,
+          { method: 'POST', headers: { 'Content-Type': 'application/dicom' }, body }
+        );
+        if (!resp.ok) {
+          failed += 1;
+        }
+      } catch (e) {
+        failed += 1;
+      }
+      done += 1;
+      onProgress?.(done, total, failed);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+  return { total, failed };
+}
+
+function AddFilesToStudyButton({ studyInstanceUid, onUploaded, uiNotificationService }) {
+  const inputRef = React.useRef(null);
+  const [progress, setProgress] = React.useState(null);
+  const uploading = progress !== null;
+
+  const handleFiles = async event => {
+    const files = event.target.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+    setProgress({ done: 0, total: files.length });
+
+    const { total, failed } = await uploadFilesToStudy(studyInstanceUid, files, (done, count) =>
+      setProgress({ done, total: count })
+    );
+
+    setProgress(null);
+    event.target.value = '';
+
+    uiNotificationService?.show({
+      title: '添加文件',
+      message: failed
+        ? `${total - failed}/${total} 个文件已添加，${failed} 个失败`
+        : `已向该条目添加 ${total} 个文件`,
+      type: failed ? 'warning' : 'success',
+      duration: 4000,
+    });
+
+    onUploaded?.();
+  };
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFiles}
+      />
+      <Button
+        type={ButtonEnums.type.secondary}
+        size={ButtonEnums.size.smallTall}
+        disabled={uploading}
+        startIcon={<Icons.GroupLayers className="!h-[20px] !w-[20px]" />}
+        onClick={() => inputRef.current?.click()}
+        dataCY={`add-files-${studyInstanceUid}`}
+      >
+        {uploading && progress ? `上传中 ${progress.done}/${progress.total}` : '添加文件'}
+      </Button>
+    </>
+  );
+}
+
+/**
  * TODO:
  * - debounce `setFilterValues` (150ms?)
  */
@@ -95,7 +187,8 @@ function WorkList({
   const sortModifier = sortDirection === 'descending' ? 1 : -1;
   const defaultSortValues =
     shouldUseDefaultSort && canSort ? { sortBy: 'studyDate', sortDirection: 'ascending' } : {};
-  const { customizationService } = servicesManager.services;
+  const { customizationService, uiNotificationService } = servicesManager.services;
+  const isUploadEnabled = Boolean(dataSource.getConfig?.()?.dicomUploadEnabled);
 
   const sortedStudies = useMemo(() => {
     if (!canSort) {
@@ -463,6 +556,13 @@ function WorkList({
                 )
               );
             })}
+            {isUploadEnabled && (
+              <AddFilesToStudyButton
+                studyInstanceUid={studyInstanceUid}
+                onUploaded={onRefresh}
+                uiNotificationService={uiNotificationService}
+              />
+            )}
           </div>
         </StudyListExpandedRow>
       ),

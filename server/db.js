@@ -115,6 +115,10 @@ function getAllStudies(db) {
   return db.prepare('SELECT * FROM studies ORDER BY study_date DESC, created_at DESC').all();
 }
 
+function getStudy(db, studyInstanceUID) {
+  return db.prepare('SELECT * FROM studies WHERE study_instance_uid = ?').get(studyInstanceUID);
+}
+
 function getSeriesForStudy(db, studyInstanceUID) {
   return db.prepare('SELECT * FROM series WHERE study_instance_uid = ?').all(studyInstanceUID);
 }
@@ -143,6 +147,7 @@ module.exports = {
   upsertInstance,
   refreshStudyCounts,
   getAllStudies,
+  getStudy,
   getSeriesForStudy,
   getInstancesForSeries,
   getInstance,

@@ -16,6 +16,7 @@ const {
   upsertInstance,
   refreshStudyCounts,
   getAllStudies,
+  getStudy,
   getSeriesForStudy,
   getInstancesForSeries,
   getInstance,
@@ -62,22 +63,36 @@ process.on('unhandledRejection', reason => {
 app.use(cors());
 app.use(express.raw({ type: '*/*', limit: '512mb' }));
 
-function ingestDicomBuffer(buffer) {
+function ingestDicomBuffer(buffer, options = {}) {
   const dataset = readDicomBuffer(buffer);
 
   if (!dataset.StudyInstanceUID || !dataset.SeriesInstanceUID || !dataset.SOPInstanceUID) {
     throw new Error('Missing required DICOM UIDs');
   }
 
-  // Group every DICOM by patient: replace the real StudyInstanceUID with a
-  // stable patient-level UID so all of a patient's data (across studies and
-  // across separate uploads over time) collapses into one row on the main page.
-  dataset.StudyInstanceUID = getPatientStudyUid(dataset);
+  const targetStudyUID = String(options.targetStudyUID || '').trim();
+  let preserveStudyMeta = false;
+
+  if (targetStudyUID) {
+    // Explicit target: force this instance into the chosen main-page entry even
+    // if the file's PatientID/Name differs. If the entry already exists, keep
+    // its patient metadata untouched (only add the new series/instances).
+    dataset.StudyInstanceUID = targetStudyUID;
+    preserveStudyMeta = Boolean(getStudy(db, targetStudyUID));
+  } else {
+    // Default: group every DICOM by patient by replacing the real
+    // StudyInstanceUID with a stable patient-level UID, so all of a patient's
+    // data (across studies and separate uploads over time) collapses into one
+    // row on the main page.
+    dataset.StudyInstanceUID = getPatientStudyUid(dataset);
+  }
 
   const filePath = saveDicomFile(DICOM_DIR, dataset, buffer);
   const metadataJson = JSON.stringify(datasetToQidoTags(dataset));
 
-  upsertStudy(db, extractStudyMeta(dataset));
+  if (!preserveStudyMeta) {
+    upsertStudy(db, extractStudyMeta(dataset));
+  }
   upsertSeries(db, extractSeriesMeta(dataset));
   upsertInstance(db, {
     sopInstanceUID: dataset.SOPInstanceUID,
@@ -325,6 +340,31 @@ app.post('/api/upload', upload.array('files'), (req, res) => {
     res.json({ success: true, count: results.length, files: results });
   } catch (err) {
     console.error('Upload error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add a single DICOM file to a specific existing main-page entry. The raw file
+// bytes are sent as the request body (buffered by express.raw) and forced into
+// the study identified by ?targetStudyUID=, regardless of the file's patient
+// tags. Used by the per-row "add files" action on the study list.
+app.post('/api/studies/:studyUID/instances', (req, res) => {
+  try {
+    const targetStudyUID = req.params.studyUID;
+    const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || []);
+    if (!buffer.length) {
+      return res.status(400).json({ error: 'No DICOM data received' });
+    }
+
+    const dataset = ingestDicomBuffer(buffer, { targetStudyUID });
+    res.json({
+      success: true,
+      studyInstanceUID: dataset.StudyInstanceUID,
+      seriesInstanceUID: dataset.SeriesInstanceUID,
+      sopInstanceUID: dataset.SOPInstanceUID,
+    });
+  } catch (err) {
+    console.error('Add-to-study upload error:', err);
     res.status(500).json({ error: err.message });
   }
 });
