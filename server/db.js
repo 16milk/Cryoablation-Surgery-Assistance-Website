@@ -66,12 +66,10 @@ function upsertStudy(db, meta) {
     ON CONFLICT(study_instance_uid) DO UPDATE SET
       patient_name = excluded.patient_name,
       patient_id = excluded.patient_id,
-      study_date = excluded.study_date,
-      study_time = excluded.study_time,
-      study_description = excluded.study_description,
-      accession_number = excluded.accession_number,
-      modalities = excluded.modalities,
-      num_instances = excluded.num_instances
+      study_date = CASE WHEN excluded.study_date >= study_date THEN excluded.study_date ELSE study_date END,
+      study_time = CASE WHEN excluded.study_date >= study_date THEN excluded.study_time ELSE study_time END,
+      study_description = CASE WHEN excluded.study_date >= study_date THEN excluded.study_description ELSE study_description END,
+      accession_number = CASE WHEN excluded.study_date >= study_date THEN excluded.accession_number ELSE accession_number END
   `).run(meta);
 }
 

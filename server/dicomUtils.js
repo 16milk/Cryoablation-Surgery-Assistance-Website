@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const dcmjs = require('dcmjs');
 
 const { DicomMetaDictionary } = dcmjs.data;
@@ -46,6 +47,34 @@ function formatPatientName(name) {
   }
   if (typeof name === 'object') return name.Alphabetic || name.Ideographic || '';
   return String(name);
+}
+
+// Generate a stable, DICOM-valid UID that represents a single patient.
+// Using the `2.25.<integer>` UUID-derived OID convention. The same patient key
+// always produces the same UID, so every DICOM belonging to that patient is
+// grouped under one "study" row on the main page, regardless of its real
+// StudyInstanceUID or when it was uploaded.
+function patientUidFromKey(key) {
+  const hash = crypto.createHash('sha256').update(key).digest();
+  let big = BigInt('0x' + hash.subarray(0, 14).toString('hex'));
+  if (big === 0n) {
+    big = 1n;
+  }
+  return '2.25.' + big.toString();
+}
+
+// Resolve the patient-level grouping UID for a dataset. Falls back to the real
+// StudyInstanceUID when no patient identity is available (so nothing is lost).
+function getPatientStudyUid(dataset) {
+  const patientId = (dataset.PatientID || '').trim();
+  const patientName = formatPatientName(dataset.PatientName).trim();
+  const key = patientId || patientName;
+
+  if (!key) {
+    return dataset.StudyInstanceUID;
+  }
+
+  return patientUidFromKey(key);
 }
 
 function extractStudyMeta(dataset) {
@@ -153,6 +182,7 @@ function extractPixelDataFrame(buffer) {
 module.exports = {
   readDicomBuffer,
   datasetToQidoTags,
+  getPatientStudyUid,
   extractStudyMeta,
   extractSeriesMeta,
   buildStudyQidoRow,

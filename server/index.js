@@ -19,6 +19,7 @@ const {
 const {
   readDicomBuffer,
   datasetToQidoTags,
+  getPatientStudyUid,
   extractStudyMeta,
   extractSeriesMeta,
   buildStudyQidoRow,
@@ -43,6 +44,11 @@ function ingestDicomBuffer(buffer) {
   if (!dataset.StudyInstanceUID || !dataset.SeriesInstanceUID || !dataset.SOPInstanceUID) {
     throw new Error('Missing required DICOM UIDs');
   }
+
+  // Group every DICOM by patient: replace the real StudyInstanceUID with a
+  // stable patient-level UID so all of a patient's data (across studies and
+  // across separate uploads over time) collapses into one row on the main page.
+  dataset.StudyInstanceUID = getPatientStudyUid(dataset);
 
   const filePath = saveDicomFile(DICOM_DIR, dataset, buffer);
   const metadataJson = JSON.stringify(datasetToQidoTags(dataset));
