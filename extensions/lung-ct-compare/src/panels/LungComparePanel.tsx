@@ -20,6 +20,11 @@ import {
   stackCoordinate,
 } from '../utils/spatialSync';
 import {
+  Vec3,
+  mapBaselineToCompare,
+  mapCompareToBaseline,
+} from '../registration/lungRegistration';
+import {
   LUNG_COMPARE_PROTOCOL_ID,
   LUNG_COMPARE_STAGE_2UP_ID,
   LUNG_COMPARE_STAGE_3D_ID,
@@ -27,6 +32,12 @@ import {
   LUNG_VIEWPORT_RIGHT,
   LUNG_VIEWPORT_3D,
 } from '../hangingProtocol/lungCtCompare';
+import {
+  LUNG_STRUCTURES,
+  LungStructureDef,
+  LungStructureId,
+  getLungSegmentationProvider,
+} from '../segmentation/lungSegmentation';
 
 const OUT_OF_RANGE_MM = 18;
 
@@ -100,6 +111,14 @@ export default function LungComparePanel() {
 
   /** UI value for layout Select (`3d` = stage with volume; `2up` = side‑by‑side only). */
   const [layoutChoice, setLayoutChoice] = useState<'3d' | '2up'>('3d');
+
+  /** Which structure overlays are currently toggled on (lung parenchyma / nodule / vessel / ice ball). */
+  const [activeStructures, setActiveStructures] = useState<Record<LungStructureId, boolean>>({
+    lungParenchyma: false,
+    nodule: false,
+    vessel: false,
+    iceBall: false,
+  });
 
   /** Re-render when display sets load or metadata updates so CT filters see numImageFrames etc. */
   const [, setDisplaySetsRev] = useState(0);
@@ -288,7 +307,13 @@ export default function LungComparePanel() {
       return undefined;
     }
 
-    function setup(sourceId: string, targetId: string, updateBannerOnForward: boolean) {
+    /** `forward` = left (baseline) drives right (compare); else compare drives baseline. */
+    function setup(
+      sourceId: string,
+      targetId: string,
+      updateBannerOnForward: boolean,
+      forward: boolean
+    ) {
       let element: HTMLElement | null = null;
       let timer: number | undefined;
 
@@ -329,10 +354,34 @@ export default function LungComparePanel() {
           return;
         }
 
-        const targetCoord = stackCoordinate(plane.imagePositionPatient, axisNormal);
+        /**
+         * Carry the current source slice's patient-space position through the
+         * registration's deformation/offset field into the target volume, then
+         * project onto the target stacking axis to find the matching slice. With
+         * the identity mock this reduces to plain anatomical alignment; a trained
+         * field makes the right side follow the registered location.
+         */
+        const ipp = plane.imagePositionPatient;
+        const sourcePoint: Vec3 = [ipp[0], ipp[1], ipp[2]];
+        const regContext = {
+          baselineDisplaySetInstanceUID:
+            cornerstoneViewportService.getViewportDisplaySets(LUNG_VIEWPORT_LEFT)[0]
+              ?.displaySetInstanceUID ?? null,
+          compareDisplaySetInstanceUID:
+            cornerstoneViewportService.getViewportDisplaySets(LUNG_VIEWPORT_RIGHT)[0]
+              ?.displaySetInstanceUID ?? null,
+          servicesManager,
+        };
+        const mappedPoint = forward
+          ? mapBaselineToCompare(sourcePoint, regContext)
+          : mapCompareToBaseline(sourcePoint, regContext);
+
+        /** Use the target's own stacking axis so displaced points project correctly. */
+        const targetNormal = normalFromImagePlane(tgtIds[0]) ?? axisNormal;
+        const targetCoord = stackCoordinate(mappedPoint, targetNormal);
         const { index: nearestIndex, deltaMm } = findNearestSliceIndexByAxis(
           tgtIds,
-          axisNormal,
+          targetNormal,
           targetCoord
         );
 
@@ -400,17 +449,48 @@ export default function LungComparePanel() {
       };
     }
 
-    const unLeft = setup(LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT, true);
-    const unRight = setup(LUNG_VIEWPORT_RIGHT, LUNG_VIEWPORT_LEFT, false);
+    const unLeft = setup(LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT, true, true);
+    const unRight = setup(LUNG_VIEWPORT_RIGHT, LUNG_VIEWPORT_LEFT, false, false);
 
     return () => {
       unLeft();
       unRight();
     };
-  }, [commandsManager, cornerstoneViewportService, syncEnabled, t]);
+  }, [commandsManager, cornerstoneViewportService, servicesManager, syncEnabled, t]);
 
   const describe = ds =>
     `${ds.SeriesDescription || 'CT'} (#${ds.SeriesNumber ?? '?'}) · ${ctSliceCount(ds) || '?'} img`;
+
+  /**
+   * Toggle a structure overlay on/off. The actual segmentation (labelmap
+   * creation, coloring, viewport visibility) is delegated to the registered
+   * provider — a no-op stub until the real feature is inserted. The button
+   * state here flips regardless so the UI stays responsive.
+   */
+  const toggleStructure = useCallback(
+    (structure: LungStructureDef) => {
+      setActiveStructures(prev => {
+        const visible = !prev[structure.id];
+        try {
+          Promise.resolve(
+            getLungSegmentationProvider().onToggle({
+              structure,
+              visible,
+              viewportIds: [LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT],
+              baselineDisplaySetInstanceUID: baselineUid,
+              compareDisplaySetInstanceUID: compareUid,
+              servicesManager,
+              commandsManager,
+            })
+          ).catch(e => console.warn('lung-ct-compare: segmentation toggle failed', e));
+        } catch (e) {
+          console.warn('lung-ct-compare: segmentation toggle failed', e);
+        }
+        return { ...prev, [structure.id]: visible };
+      });
+    },
+    [baselineUid, compareUid, servicesManager, commandsManager]
+  );
 
   const swapSides = useCallback(() => {
     if (!baselineUid || !compareUid || baselineUid === compareUid) {
@@ -608,6 +688,38 @@ export default function LungComparePanel() {
         >
           {t('clearLayoutMemory')}
         </Button>
+      </div>
+
+      <div
+        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        data-cy="lung-compare-segmentation"
+      >
+        <Label className="text-xs text-muted-foreground">{t('segmentationLabel')}</Label>
+        <div className="grid grid-cols-2 gap-2">
+          {LUNG_STRUCTURES.map(structure => {
+            const active = activeStructures[structure.id];
+            return (
+              <Button
+                key={structure.id}
+                type="button"
+                variant={active ? 'default' : 'outline'}
+                size="sm"
+                dataCY={`lung-seg-${structure.id}`}
+                aria-pressed={active}
+                className="justify-start gap-2"
+                onClick={() => toggleStructure(structure)}
+              >
+                <span
+                  className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/30"
+                  style={{ backgroundColor: structure.colorHex }}
+                  aria-hidden="true"
+                />
+                {t(structure.labelKey)}
+              </Button>
+            );
+          })}
+        </div>
+        <p className="text-muted-foreground text-xs leading-snug">{t('segmentationHelp')}</p>
       </div>
 
       <div className="flex flex-col gap-1 border-t border-secondary-light pt-2">
