@@ -1,3 +1,8 @@
+// Install rotating, self-pruning logging BEFORE anything else logs, so all
+// console output (including dependency noise) is captured and bounded.
+const logger = require('./logger');
+logger.install();
+
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -330,6 +335,16 @@ app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', studies: count.c });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// Observability for the rotating logger: current files, disk usage, and how
+// much noisy output has been suppressed.
+app.get('/api/logs/stats', (_req, res) => {
+  try {
+    res.json(logger.stats());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

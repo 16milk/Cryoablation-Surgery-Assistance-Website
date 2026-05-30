@@ -16,16 +16,16 @@ echo ""
 
 # Start server in background with an auto-restart loop, so that if the backend
 # ever exits (crash, OOM, etc.) it comes back instead of leaving the frontend
-# stuck on ECONNREFUSED. Logs are mirrored to server/data/server.log for
-# post-mortem debugging.
-SERVER_LOG="$ROOT/server/data/server.log"
+# stuck on ECONNREFUSED. The Node server owns its own rotating, size-capped log
+# under server/data/logs/ (see server/logger.js), so we deliberately do NOT
+# tee into an ever-growing file here; output is just mirrored to this terminal.
 mkdir -p "$ROOT/server/data"
 
 (
   while true; do
-    echo "[dev-local] starting backend (node index.js) at $(date)" | tee -a "$SERVER_LOG"
-    (cd "$ROOT/server" && node index.js) 2>&1 | tee -a "$SERVER_LOG"
-    echo "[dev-local] backend exited (code $?). Restarting in 1s..." | tee -a "$SERVER_LOG"
+    echo "[dev-local] starting backend (node index.js) at $(date)"
+    (cd "$ROOT/server" && node index.js)
+    echo "[dev-local] backend exited (code $?). Restarting in 1s..."
     sleep 1
   done
 ) &
