@@ -26,6 +26,7 @@
       "@ohif/extension-ultrasound-pleura-bline": ["./extensions/usAnnotation/src"],
       "@ohif/mode-ultrasound-pleura-bline": ["./modes/usAnnotation/src"],
       "@ohif/extension-cornerstone": ["./extensions/cornerstone/src"],
+      "@ohif/extension-lung-ct-compare": ["./extensions/lung-ct-compare/src"],
       "@ohif/extension-dicom-pdf": ["./extensions/dicom-pdf/src"],
       "@state": ["./platform/app/src/state"]
     }
