@@ -138,6 +138,25 @@ function getInstance(db, studyInstanceUID, seriesInstanceUID, sopInstanceUID) {
   `).get(studyInstanceUID, seriesInstanceUID, sopInstanceUID);
 }
 
+function getInstancesForStudy(db, studyInstanceUID) {
+  return db.prepare('SELECT * FROM instances WHERE study_instance_uid = ?').all(studyInstanceUID);
+}
+
+function deleteStudy(db, studyInstanceUID) {
+  db.prepare('DELETE FROM instances WHERE study_instance_uid = ?').run(studyInstanceUID);
+  db.prepare('DELETE FROM series WHERE study_instance_uid = ?').run(studyInstanceUID);
+  db.prepare('DELETE FROM studies WHERE study_instance_uid = ?').run(studyInstanceUID);
+}
+
+function deleteSeries(db, studyInstanceUID, seriesInstanceUID) {
+  db.prepare(
+    'DELETE FROM instances WHERE study_instance_uid = ? AND series_instance_uid = ?'
+  ).run(studyInstanceUID, seriesInstanceUID);
+  db.prepare(
+    'DELETE FROM series WHERE study_instance_uid = ? AND series_instance_uid = ?'
+  ).run(studyInstanceUID, seriesInstanceUID);
+}
+
 module.exports = {
   DATA_DIR,
   DICOM_DIR,
@@ -151,4 +170,7 @@ module.exports = {
   getSeriesForStudy,
   getInstancesForSeries,
   getInstance,
+  getInstancesForStudy,
+  deleteStudy,
+  deleteSeries,
 };

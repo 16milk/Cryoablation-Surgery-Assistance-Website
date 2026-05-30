@@ -138,6 +138,105 @@ function AddFilesToStudyButton({ studyInstanceUid, onUploaded, uiNotificationSer
   );
 }
 
+async function deleteStudyRequest(studyInstanceUid) {
+  const resp = await fetch(`/api/studies/${encodeURIComponent(studyInstanceUid)}`, {
+    method: 'DELETE',
+  });
+  return resp.ok;
+}
+
+async function deleteSeriesRequest(studyInstanceUid, seriesInstanceUid) {
+  const resp = await fetch(
+    `/api/studies/${encodeURIComponent(studyInstanceUid)}/series/${encodeURIComponent(seriesInstanceUid)}`,
+    { method: 'DELETE' }
+  );
+  return resp.ok;
+}
+
+function DeleteStudyButton({ studyInstanceUid, patientName, onDeleted, uiNotificationService }) {
+  const [busy, setBusy] = React.useState(false);
+
+  const handleClick = async () => {
+    if (busy) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定删除该条目${patientName ? `（${patientName}）` : ''}的全部数据吗？此操作不可恢复。`
+    );
+    if (!confirmed) {
+      return;
+    }
+    setBusy(true);
+    const ok = await deleteStudyRequest(studyInstanceUid).catch(() => false);
+    setBusy(false);
+    uiNotificationService?.show({
+      title: '删除条目',
+      message: ok ? '已删除该条目' : '删除失败',
+      type: ok ? 'success' : 'error',
+      duration: 4000,
+    });
+    if (ok) {
+      onDeleted?.();
+    }
+  };
+
+  return (
+    <Button
+      type={ButtonEnums.type.secondary}
+      size={ButtonEnums.size.smallTall}
+      disabled={busy}
+      startIcon={<Icons.Trash className="!h-[20px] !w-[20px]" />}
+      onClick={handleClick}
+      dataCY={`delete-study-${studyInstanceUid}`}
+    >
+      {busy ? '删除中…' : '删除该条目'}
+    </Button>
+  );
+}
+
+function DeleteSeriesButton({
+  studyInstanceUid,
+  seriesInstanceUid,
+  onDeleted,
+  uiNotificationService,
+}) {
+  const [busy, setBusy] = React.useState(false);
+
+  const handleClick = async () => {
+    if (busy || !seriesInstanceUid) {
+      return;
+    }
+    if (!window.confirm('确定删除该序列吗？此操作不可恢复。')) {
+      return;
+    }
+    setBusy(true);
+    const ok = await deleteSeriesRequest(studyInstanceUid, seriesInstanceUid).catch(() => false);
+    setBusy(false);
+    uiNotificationService?.show({
+      title: '删除序列',
+      message: ok ? '已删除该序列' : '删除失败',
+      type: ok ? 'success' : 'error',
+      duration: 4000,
+    });
+    if (ok) {
+      onDeleted?.();
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={handleClick}
+      className="text-red-400 hover:text-red-300 disabled:opacity-50"
+      title="删除该序列"
+      data-cy={`delete-series-${seriesInstanceUid}`}
+    >
+      <Icons.Trash className="inline-flex h-5 w-5" />
+    </button>
+  );
+}
+
 /**
  * TODO:
  * - debounce `setFilterValues` (150ms?)
@@ -223,6 +322,56 @@ function WorkList({
   // ~ Rows & Studies
   const [expandedRows, setExpandedRows] = useState([]);
   const [studiesWithSeriesData, setStudiesWithSeriesData] = useState([]);
+  const [selectedStudyUids, setSelectedStudyUids] = useState(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  const toggleStudySelection = uid => {
+    setSelectedStudyUids(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) {
+        next.delete(uid);
+      } else {
+        next.add(uid);
+      }
+      return next;
+    });
+  };
+
+  const handleSeriesDeleted = studyUid => {
+    seriesInStudiesMap.delete(studyUid);
+    setStudiesWithSeriesData(prev => prev.filter(id => id !== studyUid));
+    onRefresh();
+  };
+
+  const handleBulkDelete = async () => {
+    const uids = Array.from(selectedStudyUids);
+    if (uids.length === 0) {
+      return;
+    }
+    if (!window.confirm(`确定删除选中的 ${uids.length} 条数据吗？此操作不可恢复。`)) {
+      return;
+    }
+    setBulkDeleting(true);
+    let failed = 0;
+    for (const uid of uids) {
+      const ok = await deleteStudyRequest(uid).catch(() => false);
+      if (!ok) {
+        failed += 1;
+      }
+    }
+    setBulkDeleting(false);
+    setSelectedStudyUids(new Set());
+    setExpandedRows([]);
+    uiNotificationService?.show({
+      title: '批量删除',
+      message: failed
+        ? `成功 ${uids.length - failed} 条，失败 ${failed} 条`
+        : `已删除 ${uids.length} 条数据`,
+      type: failed ? 'warning' : 'success',
+      duration: 4000,
+    });
+    onRefresh();
+  };
   const numOfStudies = studiesTotal;
   const querying = useMemo(() => {
     return isLoadingData || expandedRows.length > 0;
@@ -393,7 +542,21 @@ function WorkList({
       row: [
         {
           key: 'patientName',
-          content: patientName ? makeCopyTooltipCell(patientName) : null,
+          content: (
+            <div className="flex items-center">
+              {isUploadEnabled && (
+                <input
+                  type="checkbox"
+                  className="accent-primary-light mr-3 h-4 w-4 cursor-pointer"
+                  checked={selectedStudyUids.has(studyInstanceUid)}
+                  onClick={event => event.stopPropagation()}
+                  onChange={() => toggleStudySelection(studyInstanceUid)}
+                  aria-label="选择该条目"
+                />
+              )}
+              {patientName ? makeCopyTooltipCell(patientName) : null}
+            </div>
+          ),
           gridCol: 4,
         },
         {
@@ -454,16 +617,28 @@ function WorkList({
             seriesNumber: t('StudyList:Series'),
             modality: t('StudyList:Modality'),
             instances: t('StudyList:Instances'),
+            ...(isUploadEnabled ? { actions: '操作' } : {}),
           }}
           seriesTableDataSource={
             seriesInStudiesMap.has(studyInstanceUid)
               ? seriesInStudiesMap.get(studyInstanceUid).map(s => {
-                  return {
+                  const seriesRow = {
                     description: s.description || '(empty)',
                     seriesNumber: s.seriesNumber ?? '',
                     modality: s.modality || '',
                     instances: s.numSeriesInstances || '',
                   };
+                  if (isUploadEnabled) {
+                    seriesRow.actions = (
+                      <DeleteSeriesButton
+                        studyInstanceUid={studyInstanceUid}
+                        seriesInstanceUid={s.seriesInstanceUid}
+                        onDeleted={() => handleSeriesDeleted(studyInstanceUid)}
+                        uiNotificationService={uiNotificationService}
+                      />
+                    );
+                  }
+                  return seriesRow;
                 })
               : []
           }
@@ -560,6 +735,14 @@ function WorkList({
               <AddFilesToStudyButton
                 studyInstanceUid={studyInstanceUid}
                 onUploaded={onRefresh}
+                uiNotificationService={uiNotificationService}
+              />
+            )}
+            {isUploadEnabled && (
+              <DeleteStudyButton
+                studyInstanceUid={studyInstanceUid}
+                patientName={patientName}
+                onDeleted={onRefresh}
                 uiNotificationService={uiNotificationService}
               />
             )}
@@ -682,6 +865,29 @@ function WorkList({
           </div>
           {hasStudies ? (
             <div className="flex grow flex-col">
+              {isUploadEnabled && selectedStudyUids.size > 0 && (
+                <div className="container relative m-auto flex items-center justify-between px-2 py-2">
+                  <span className="text-white">已选 {selectedStudyUids.size} 条</span>
+                  <div className="flex gap-2">
+                    <Button
+                      type={ButtonEnums.type.secondary}
+                      size={ButtonEnums.size.smallTall}
+                      onClick={() => setSelectedStudyUids(new Set())}
+                    >
+                      清除选择
+                    </Button>
+                    <Button
+                      type={ButtonEnums.type.primary}
+                      size={ButtonEnums.size.smallTall}
+                      disabled={bulkDeleting}
+                      startIcon={<Icons.Trash className="!h-[20px] !w-[20px] text-black" />}
+                      onClick={handleBulkDelete}
+                    >
+                      {bulkDeleting ? '删除中…' : '删除所选'}
+                    </Button>
+                  </div>
+                </div>
+              )}
               <StudyListTable
                 tableDataSource={tableDataSource.slice(offset, offsetAndTake)}
                 numOfStudies={numOfStudies}

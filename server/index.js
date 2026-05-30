@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 
 const {
   initDb,
@@ -20,6 +21,9 @@ const {
   getSeriesForStudy,
   getInstancesForSeries,
   getInstance,
+  getInstancesForStudy,
+  deleteStudy,
+  deleteSeries,
 } = require('./db');
 
 const {
@@ -365,6 +369,63 @@ app.post('/api/studies/:studyUID/instances', (req, res) => {
     });
   } catch (err) {
     console.error('Add-to-study upload error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Delete ───────────────────────────────────────────────────────────────────
+
+// Best-effort removal of files on disk; never throws so DB stays consistent.
+function removeFilesQuietly(instances, dirToRemove) {
+  for (const inst of instances || []) {
+    try {
+      if (inst.file_path) {
+        fs.rmSync(inst.file_path, { force: true });
+      }
+    } catch (err) {
+      console.warn('removeFilesQuietly: failed to delete file', inst.file_path, err.message);
+    }
+  }
+  if (dirToRemove) {
+    try {
+      fs.rmSync(dirToRemove, { recursive: true, force: true });
+    } catch (err) {
+      console.warn('removeFilesQuietly: failed to delete dir', dirToRemove, err.message);
+    }
+  }
+}
+
+// Delete a whole study (one main-page entry): DB rows + files on disk.
+app.delete('/api/studies/:studyUID', (req, res) => {
+  try {
+    const studyUID = req.params.studyUID;
+    if (!getStudy(db, studyUID)) {
+      return res.status(404).json({ error: 'Study not found' });
+    }
+    const instances = getInstancesForStudy(db, studyUID);
+    deleteStudy(db, studyUID);
+    removeFilesQuietly(instances, path.join(DICOM_DIR, studyUID));
+    res.json({ success: true, deletedInstances: instances.length });
+  } catch (err) {
+    console.error('Delete study error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a single series within a study (specific data inside a row).
+app.delete('/api/studies/:studyUID/series/:seriesUID', (req, res) => {
+  try {
+    const { studyUID, seriesUID } = req.params;
+    const instances = getInstancesForSeries(db, studyUID, seriesUID);
+    if (instances.length === 0 && !getStudy(db, studyUID)) {
+      return res.status(404).json({ error: 'Series not found' });
+    }
+    deleteSeries(db, studyUID, seriesUID);
+    refreshStudyCounts(db, studyUID);
+    removeFilesQuietly(instances, path.join(DICOM_DIR, studyUID, seriesUID));
+    res.json({ success: true, deletedInstances: instances.length });
+  } catch (err) {
+    console.error('Delete series error:', err);
     res.status(500).json({ error: err.message });
   }
 });
