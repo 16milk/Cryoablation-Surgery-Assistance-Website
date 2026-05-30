@@ -27,7 +27,15 @@ const {
   saveDicomFile,
   extractPixelDataFrame,
   denaturalizeDataset,
+  sanitizeQidoTags,
 } = require('./dicomUtils');
+
+// Parse a stored per-instance metadata blob and strip inline pixel data / null
+// Values so older rows (saved before sanitization) don't crash the frontend's
+// dcmjs naturalizeDataset.
+function parseInstanceMetadata(metadataJson) {
+  return sanitizeQidoTags(JSON.parse(metadataJson));
+}
 
 const PORT = process.env.PORT || 5100;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 512 * 1024 * 1024 } });
@@ -149,7 +157,7 @@ app.get('/dicomweb/studies/:studyUID/series', (req, res) => {
 app.get('/dicomweb/studies/:studyUID/series/:seriesUID/metadata', (req, res) => {
   try {
     const instances = getInstancesForSeries(db, req.params.studyUID, req.params.seriesUID);
-    const metadata = instances.map(inst => JSON.parse(inst.metadata_json));
+    const metadata = instances.map(inst => parseInstanceMetadata(inst.metadata_json));
     res.set('Content-Type', 'application/dicom+json');
     res.json(metadata);
   } catch (err) {
@@ -166,7 +174,7 @@ app.get('/dicomweb/studies/:studyUID/metadata', (req, res) => {
     for (const s of series) {
       const instances = getInstancesForSeries(db, req.params.studyUID, s.series_instance_uid);
       for (const inst of instances) {
-        allMetadata.push(JSON.parse(inst.metadata_json));
+        allMetadata.push(parseInstanceMetadata(inst.metadata_json));
       }
     }
 

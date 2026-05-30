@@ -24,17 +24,59 @@ function readDicomBuffer(buffer) {
   return dataset;
 }
 
-function datasetToQidoTags(dataset) {
-  const denaturalized = denaturalizeDataset(dataset);
+// Tags whose value is bulk binary data that must NOT be inlined into the
+// DICOMweb metadata. Pixel data is delivered separately via the frames
+// endpoint; leaving it here both bloats the metadata and (because the bytes are
+// not JSON-serializable) lands as `Value: null`, which crashes dcmjs
+// naturalizeDataset on the frontend ("Cannot read properties of null").
+const BULK_BINARY_TAGS = new Set([
+  '7FE00010', // PixelData
+  '7FE00009', // DoubleFloatPixelData
+  '7FE00008', // FloatPixelData
+  '00420011', // EncapsulatedDocument
+]);
+
+/**
+ * Make a DICOM-JSON tag map safe for `naturalizeDataset`:
+ *  - drop bulk binary tags (pixel data etc.),
+ *  - recurse into sequences (SQ),
+ *  - guarantee every element has an array `Value` (or a Bulk/Inline reference),
+ *    never `null`/`undefined`, so dcmjs never reads `.length` of null.
+ */
+function sanitizeQidoTags(tags) {
   const result = {};
 
-  for (const [tag, value] of Object.entries(denaturalized)) {
-    if (value && typeof value === 'object' && value.vr) {
-      result[tag] = value;
+  for (const [tag, element] of Object.entries(tags || {})) {
+    if (!element || typeof element !== 'object' || !element.vr) {
+      continue;
     }
+    if (BULK_BINARY_TAGS.has(tag)) {
+      continue;
+    }
+
+    const clean = { vr: element.vr };
+
+    if (element.vr === 'SQ') {
+      const items = Array.isArray(element.Value) ? element.Value : [];
+      clean.Value = items.filter(Boolean).map(item => sanitizeQidoTags(item));
+    } else if (Array.isArray(element.Value)) {
+      clean.Value = element.Value;
+    } else if (element.BulkDataURI != null) {
+      clean.BulkDataURI = element.BulkDataURI;
+    } else if (element.InlineBinary != null) {
+      clean.InlineBinary = element.InlineBinary;
+    } else {
+      clean.Value = [];
+    }
+
+    result[tag] = clean;
   }
 
   return result;
+}
+
+function datasetToQidoTags(dataset) {
+  return sanitizeQidoTags(denaturalizeDataset(dataset));
 }
 
 function formatPatientName(name) {
@@ -184,6 +226,7 @@ function extractPixelDataFrame(buffer) {
 module.exports = {
   readDicomBuffer,
   datasetToQidoTags,
+  sanitizeQidoTags,
   getPatientStudyUid,
   extractStudyMeta,
   extractSeriesMeta,
