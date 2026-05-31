@@ -3,9 +3,14 @@ import {
   imageLoader,
   metaData,
   Types as csTypes,
+  volumeLoader,
 } from '@cornerstonejs/core';
-import { segmentation as cstSegmentation } from '@cornerstonejs/tools';
+import { Enums as csToolsEnums, segmentation as cstSegmentation } from '@cornerstonejs/tools';
 import type { ServicesManager } from '@ohif/core';
+
+/** Must match `extensions/cornerstone/src/constants`. */
+const VOLUME_LOADER_SCHEME = 'cornerstoneStreamingImageVolume';
+const { Labelmap: LABELMAP } = csToolsEnums.SegmentationRepresentations;
 
 import {
   LUNG_STRUCTURES,
@@ -31,7 +36,23 @@ import {
   setLung3DModelProvider,
 } from './lung3DModel';
 
-const { getLabelmapImageIds, triggerSegmentationEvents } = cstSegmentation;
+const { triggerSegmentationEvents } = cstSegmentation;
+
+function ctVolumeIdForDisplaySet(displaySetInstanceUID: string, volumeLoaderSchema?: string): string {
+  return `${volumeLoaderSchema ?? VOLUME_LOADER_SCHEME}:${displaySetInstanceUID}`;
+}
+
+/** Ensure the baseline CT volume exists in cache (required for derived labelmaps). */
+async function ensureCtVolumeLoaded(
+  displaySet: { displaySetInstanceUID: string; imageIds?: string[]; volumeLoaderSchema?: string },
+  referenceImageIds: string[]
+): Promise<string> {
+  const volumeId = ctVolumeIdForDisplaySet(displaySet.displaySetInstanceUID, displaySet.volumeLoaderSchema);
+  if (!cache.getVolume(volumeId)) {
+    await volumeLoader.createAndCacheVolume(volumeId, { imageIds: referenceImageIds });
+  }
+  return volumeId;
+}
 
 /** Process this many slices between event-loop yields to keep the UI responsive. */
 const YIELD_EVERY = 6;
@@ -131,31 +152,57 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       }
       segmentationService.remove(segmentationId);
     }
+    if (cache.getVolume(segmentationId)) {
+      try {
+        cache.removeVolumeLoadObject(segmentationId);
+      } catch {
+        /* volume may already be gone */
+      }
+    }
+
+    const ctVolumeId = await ensureCtVolumeLoaded(displaySet, referenceImageIds);
+    await volumeLoader.createAndCacheDerivedLabelmapVolume(ctVolumeId, { volumeId: segmentationId });
+
+    const labelmapVolume = cache.getVolume(segmentationId);
+    if (!labelmapVolume?.voxelManager) {
+      throw new Error('lung-ct-compare 3D: failed to create labelmap volume');
+    }
 
     const segments: Record<number, { label: string; active?: boolean }> = {};
-    for (const structure of LUNG_STRUCTURES) {
-      const index = SEGMENT_INDEX[structure.id];
-      segments[index] = { label: structure.id, active: index === 1 };
+    for (const id of builtChannels) {
+      const index = SEGMENT_INDEX[id];
+      segments[index] = { label: id, active: index === SEGMENT_INDEX[builtChannels[0]] };
     }
-    await segmentationService.createLabelmapForDisplaySet(displaySet, {
+
+    segmentationService.addOrUpdateSegmentation({
       segmentationId,
-      label: 'Lung 3D model',
-      segments,
+      representation: {
+        type: LABELMAP,
+        data: { volumeId: segmentationId },
+      },
+      config: {
+        label: 'Lung 3D model',
+        segments,
+      },
     });
 
-    const labelmapImageIds = getLabelmapImageIds(segmentationId) as unknown as string[];
-    if (!labelmapImageIds?.length) {
-      throw new Error('lung-ct-compare 3D: labelmap images missing');
+    const [width, height, depth] = labelmapVolume.dimensions;
+    if (!width || !height || !depth) {
+      throw new Error(
+        'lung-ct-compare 3D: CT volume not ready — wait for the bottom 3D view to finish loading'
+      );
     }
+    const sliceSize = width * height;
+    const scalar = labelmapVolume.voxelManager.getCompleteScalarDataArray();
+    scalar.fill(0);
 
-    const total = referenceImageIds.length;
-    for (let i = 0; i < total; i++) {
+    const total = Math.min(referenceImageIds.length, depth);
+    for (let z = 0; z < total; z++) {
       if (signal?.aborted) {
         throw new DOMException('Aborted', 'AbortError');
       }
-      const srcImageId = referenceImageIds[i];
-      const segImageId = labelmapImageIds[i];
-      if (!srcImageId || !segImageId) {
+      const srcImageId = referenceImageIds[z];
+      if (!srcImageId) {
         continue;
       }
 
@@ -171,46 +218,38 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
         slice = imageToHu(srcImageId);
       }
 
-      const segImage = cache.getImage(segImageId);
-      const voxel = segImage?.voxelManager as
-        | {
-            getScalarData: () => { length: number; fill: (v: number) => void; [i: number]: number };
-            setScalarData: (data: { length: number }) => void;
-          }
-        | undefined;
-
-      if (slice && voxel) {
-        const scalar = voxel.getScalarData();
-        const n = Math.min(scalar.length, slice.width * slice.height);
-        scalar.fill(0);
+      if (slice) {
         const field = computeLungField(slice.hu, slice.width, slice.height);
+        const plane = Math.min(sliceSize, slice.width * slice.height);
+        const base = z * sliceSize;
         for (const generator of generators) {
           const mask = generator.computeSliceMask(slice, field);
           if (!mask) {
             continue;
           }
           const index = SEGMENT_INDEX[generator.id];
-          const limit = Math.min(n, mask.length);
+          const limit = Math.min(plane, mask.length);
           for (let p = 0; p < limit; p++) {
             if (mask[p]) {
-              scalar[p] = index;
+              scalar[base + p] = index;
             }
           }
         }
-        voxel.setScalarData(scalar);
       }
 
-      onProgress?.(i + 1, total);
-      if (i % YIELD_EVERY === YIELD_EVERY - 1) {
+      onProgress?.(z + 1, total);
+      if (z % YIELD_EVERY === YIELD_EVERY - 1) {
         // eslint-disable-next-line no-await-in-loop
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     }
 
+    labelmapVolume.voxelManager.setCompleteScalarDataArray(scalar);
     triggerSegmentationEvents.triggerSegmentationDataModified(segmentationId);
 
-    // Surface-render in the 3D viewport (VOLUME_3D defaults to SURFACE, which
-    // polySeg computes from the labelmap we just filled).
+    // Surface-render in the 3D viewport. With a volume labelmap (not stack
+    // images) polySeg reads volumeId directly — avoids the fragile stack→volume
+    // conversion that was throwing "Failed to convert labelmap to surface".
     await segmentationService.addSegmentationRepresentation(viewportId, { segmentationId });
 
     for (const structure of LUNG_STRUCTURES) {
@@ -247,6 +286,13 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       /* representation may already be gone */
     }
     segmentationService.remove(segmentationId);
+    if (cache.getVolume(segmentationId)) {
+      try {
+        cache.removeVolumeLoadObject(segmentationId);
+      } catch {
+        /* already removed */
+      }
+    }
   }
 
   dispose(): void {
