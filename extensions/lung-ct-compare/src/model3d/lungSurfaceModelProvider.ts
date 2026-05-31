@@ -1,5 +1,7 @@
 import {
   cache,
+  Enums as csCoreEnums,
+  geometryLoader,
   imageLoader,
   metaData,
   Types as csTypes,
@@ -8,9 +10,12 @@ import {
 import { Enums as csToolsEnums, segmentation as cstSegmentation } from '@cornerstonejs/tools';
 import type { ServicesManager } from '@ohif/core';
 
+import { buildBlockSurfaceFromSegment, chooseSurfaceStep } from './blockSurfaceMesh';
+
 /** Must match `extensions/cornerstone/src/constants`. */
 const VOLUME_LOADER_SCHEME = 'cornerstoneStreamingImageVolume';
-const { Labelmap: LABELMAP } = csToolsEnums.SegmentationRepresentations;
+const { Labelmap: LABELMAP, Surface: SURFACE } = csToolsEnums.SegmentationRepresentations;
+const { addRepresentationData } = cstSegmentation;
 
 import {
   LUNG_STRUCTURES,
@@ -88,10 +93,95 @@ function imageToHu(imageId: string): SliceContext | null {
   return { imageId, hu, width, height };
 }
 
+function surfaceGeometryId(segmentationId: string, segmentIndex: number): string {
+  return `${segmentationId}::surface::${segmentIndex}`;
+}
+
 /**
- * Builds a labelmap from the segmented CT slices and lets Cornerstone
- * surface-render it in the bottom 3D viewport (polySeg labelmap→surface). One
- * labelmap segmentation per display set, one segment index per channel.
+ * Build Cornerstone surface geometries in-process so the 3D viewport never needs
+ * polySeg WASM (which throws "Failed to convert labelmap to surface").
+ */
+async function precomputeBlockSurfaces(
+  segmentationId: string,
+  labelmapVolume: {
+    dimensions: number[];
+    spacing: number[];
+    origin: number[];
+    direction: number[];
+    metadata?: { FrameOfReferenceUID?: string };
+    voxelManager: { getCompleteScalarDataArray: () => ArrayLike<number> };
+  },
+  ctVolume: { metadata?: { FrameOfReferenceUID?: string } } | undefined,
+  builtChannels: LungStructureId[]
+): Promise<Map<number, string>> {
+  const [width, height, depth] = labelmapVolume.dimensions;
+  const scalar = labelmapVolume.voxelManager.getCompleteScalarDataArray();
+  const spacing = labelmapVolume.spacing as [number, number, number];
+  const origin = labelmapVolume.origin as [number, number, number];
+  const direction = [...labelmapVolume.direction];
+  const frameOfReferenceUID =
+    ctVolume?.metadata?.FrameOfReferenceUID ??
+    labelmapVolume.metadata?.FrameOfReferenceUID ??
+    '';
+  const step = chooseSurfaceStep(width * height * depth);
+  const geometryIds = new Map<number, string>();
+
+  for (const channelId of builtChannels) {
+    const segmentIndex = SEGMENT_INDEX[channelId];
+    const structure = LUNG_STRUCTURES.find(s => s.id === channelId);
+    const mesh = buildBlockSurfaceFromSegment(
+      scalar,
+      width,
+      height,
+      depth,
+      segmentIndex,
+      spacing,
+      origin,
+      direction,
+      step
+    );
+    if (!mesh || !structure) {
+      continue;
+    }
+
+    const geometryId = surfaceGeometryId(segmentationId, segmentIndex);
+    const [r, g, b] = structure.colorRgb;
+    // eslint-disable-next-line no-await-in-loop
+    await geometryLoader.createAndCacheGeometry(geometryId, {
+      type: csCoreEnums.GeometryType.SURFACE,
+      geometryData: {
+        id: geometryId,
+        color: [r, g, b],
+        frameOfReferenceUID,
+        points: mesh.points,
+        polys: mesh.polys,
+        segmentIndex,
+        visible: true,
+      },
+    });
+    geometryIds.set(segmentIndex, geometryId);
+  }
+
+  return geometryIds;
+}
+
+function removeSurfaceGeometries(segmentationId: string): void {
+  for (const structure of LUNG_STRUCTURES) {
+    const geometryId = surfaceGeometryId(segmentationId, SEGMENT_INDEX[structure.id]);
+    if (cache.getGeometry(geometryId)) {
+      try {
+        cache.removeGeometryLoadObject(geometryId);
+      } catch {
+        /* already removed */
+      }
+    }
+  }
+}
+
+/**
+ * Builds a labelmap from the segmented CT slices and renders it as block
+ * surfaces in the bottom 3D viewport (no polySeg WASM). One labelmap
+ * segmentation per display set, one segment per channel.
  */
 class LungSurfaceModelProvider implements Lung3DModelProvider {
   private readonly segIdPrefix = 'lung-3d-model::';
@@ -152,6 +242,7 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       }
       segmentationService.remove(segmentationId);
     }
+    removeSurfaceGeometries(segmentationId);
     if (cache.getVolume(segmentationId)) {
       try {
         cache.removeVolumeLoadObject(segmentationId);
@@ -247,10 +338,28 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
     labelmapVolume.voxelManager.setCompleteScalarDataArray(scalar);
     triggerSegmentationEvents.triggerSegmentationDataModified(segmentationId);
 
-    // Surface-render in the 3D viewport. With a volume labelmap (not stack
-    // images) polySeg reads volumeId directly — avoids the fragile stack→volume
-    // conversion that was throwing "Failed to convert labelmap to surface".
-    await segmentationService.addSegmentationRepresentation(viewportId, { segmentationId });
+    const ctVolume = cache.getVolume(ctVolumeId);
+    const geometryIds = await precomputeBlockSurfaces(
+      segmentationId,
+      labelmapVolume,
+      ctVolume,
+      builtChannels
+    );
+    if (geometryIds.size === 0) {
+      throw new Error('lung-ct-compare 3D: no surface geometry generated from labelmap');
+    }
+
+    // Pre-register Surface data so the 3D viewport skips polySeg conversion.
+    addRepresentationData({
+      segmentationId,
+      type: SURFACE,
+      data: { geometryIds },
+    });
+
+    await segmentationService.addSegmentationRepresentation(viewportId, {
+      segmentationId,
+      type: SURFACE,
+    });
 
     for (const structure of LUNG_STRUCTURES) {
       const index = SEGMENT_INDEX[structure.id];
@@ -286,6 +395,7 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       /* representation may already be gone */
     }
     segmentationService.remove(segmentationId);
+    removeSurfaceGeometries(segmentationId);
     if (cache.getVolume(segmentationId)) {
       try {
         cache.removeVolumeLoadObject(segmentationId);
