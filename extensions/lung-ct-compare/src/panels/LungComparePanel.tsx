@@ -38,6 +38,10 @@ import {
   LungStructureId,
   getLungSegmentationProvider,
 } from '../segmentation/lungSegmentation';
+import {
+  getImplementedLung3DChannels,
+  getLung3DModelProvider,
+} from '../model3d/lung3DModel';
 
 const OUT_OF_RANGE_MM = 18;
 
@@ -122,6 +126,22 @@ export default function LungComparePanel() {
 
   /** Structure currently armed for click-to-prompt segmentation (null = off). */
   const [clickTarget, setClickTarget] = useState<LungStructureId | null>(null);
+
+  /** Channels selectable for the bottom 3D model (only implemented ones). */
+  const model3dChannels = useRef(getImplementedLung3DChannels());
+  /** Which 3D channels the user has selected to build. */
+  const [model3dSelection, setModel3dSelection] = useState<Record<LungStructureId, boolean>>({
+    lungParenchyma: true,
+    nodule: false,
+    vessel: false,
+    iceBall: false,
+  });
+  /** Build progress (null = idle), and a short status line. */
+  const [model3dProgress, setModel3dProgress] = useState<{ done: number; total: number } | null>(
+    null
+  );
+  const [model3dStatus, setModel3dStatus] = useState<string | null>(null);
+  const model3dAbortRef = useRef<AbortController | null>(null);
 
   /** Re-render when display sets load or metadata updates so CT filters see numImageFrames etc. */
   const [, setDisplaySetsRev] = useState(0);
@@ -546,6 +566,130 @@ export default function LungComparePanel() {
     };
   }, []);
 
+  /** Abort an in-flight 3D build if the panel unmounts. */
+  useEffect(() => {
+    return () => {
+      model3dAbortRef.current?.abort();
+    };
+  }, []);
+
+  /** Display set rendered in the 3D viewport (baseline series, with fallback). */
+  const resolve3dDisplaySetUid = useCallback((): string | null => {
+    if (baselineUid) {
+      return baselineUid;
+    }
+    const ds = cornerstoneViewportService.getViewportDisplaySets(LUNG_VIEWPORT_3D)?.[0];
+    return ds?.displaySetInstanceUID ?? null;
+  }, [baselineUid, cornerstoneViewportService]);
+
+  const buildModel3d = useCallback(async () => {
+    const grid = viewportGridService.getState?.();
+    if (!grid?.viewports?.has?.(LUNG_VIEWPORT_3D)) {
+      uiNotificationService.show({
+        title: t('model3dFailed'),
+        message: t('model3dNeed3dLayout'),
+        type: 'warning',
+        duration: 4000,
+      });
+      return;
+    }
+    const displaySetInstanceUID = resolve3dDisplaySetUid();
+    if (!displaySetInstanceUID) {
+      uiNotificationService.show({
+        title: t('model3dFailed'),
+        message: t('model3dNoSeries'),
+        type: 'warning',
+        duration: 4000,
+      });
+      return;
+    }
+
+    const channels = model3dChannels.current.filter(id => model3dSelection[id]);
+    if (channels.length === 0) {
+      uiNotificationService.show({
+        title: t('model3dFailed'),
+        message: t('model3dNoChannel'),
+        type: 'warning',
+        duration: 4000,
+      });
+      return;
+    }
+
+    model3dAbortRef.current?.abort();
+    const controller = new AbortController();
+    model3dAbortRef.current = controller;
+    setModel3dProgress({ done: 0, total: 0 });
+    setModel3dStatus(null);
+
+    try {
+      const result = await getLung3DModelProvider().build({
+        displaySetInstanceUID,
+        viewportId: LUNG_VIEWPORT_3D,
+        channels,
+        servicesManager,
+        commandsManager,
+        signal: controller.signal,
+        onProgress: (done, total) => setModel3dProgress({ done, total }),
+      });
+      if (controller.signal.aborted) {
+        return;
+      }
+      setModel3dStatus(t('model3dDone', { count: result.builtChannels.length }));
+      uiNotificationService.show({
+        title: t('model3dDoneTitle'),
+        message: t('model3dDone', { count: result.builtChannels.length }),
+        type: 'success',
+        duration: 2500,
+      });
+    } catch (e) {
+      if ((e as { name?: string })?.name === 'AbortError') {
+        return;
+      }
+      console.warn('lung-ct-compare: 3D model build failed', e);
+      setModel3dStatus(t('model3dFailed'));
+      uiNotificationService.show({
+        title: t('model3dFailed'),
+        message: e instanceof Error ? e.message : String(e),
+        type: 'error',
+        duration: 5000,
+      });
+    } finally {
+      if (model3dAbortRef.current === controller) {
+        model3dAbortRef.current = null;
+      }
+      setModel3dProgress(null);
+    }
+  }, [
+    commandsManager,
+    cornerstoneViewportService,
+    model3dSelection,
+    resolve3dDisplaySetUid,
+    servicesManager,
+    t,
+    uiNotificationService,
+    viewportGridService,
+  ]);
+
+  const clearModel3d = useCallback(() => {
+    model3dAbortRef.current?.abort();
+    model3dAbortRef.current = null;
+    setModel3dProgress(null);
+    setModel3dStatus(null);
+    const displaySetInstanceUID = resolve3dDisplaySetUid();
+    if (!displaySetInstanceUID) {
+      return;
+    }
+    try {
+      void getLung3DModelProvider().clear({
+        displaySetInstanceUID,
+        viewportId: LUNG_VIEWPORT_3D,
+        servicesManager,
+      });
+    } catch (e) {
+      console.warn('lung-ct-compare: 3D model clear failed', e);
+    }
+  }, [resolve3dDisplaySetUid, servicesManager]);
+
   const swapSides = useCallback(() => {
     if (!baselineUid || !compareUid || baselineUid === compareUid) {
       return;
@@ -817,6 +961,75 @@ export default function LungComparePanel() {
           </Button>
         )}
         <p className="text-muted-foreground text-xs leading-snug">{t('clickPromptHelp')}</p>
+      </div>
+
+      <div
+        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        data-cy="lung-compare-3d-model"
+      >
+        <Label className="text-xs text-muted-foreground">{t('model3dLabel')}</Label>
+        <div className="grid grid-cols-2 gap-2">
+          {LUNG_STRUCTURES.map(structure => {
+            const implemented = model3dChannels.current.includes(structure.id);
+            const selected = implemented && model3dSelection[structure.id];
+            return (
+              <Button
+                key={structure.id}
+                type="button"
+                variant={selected ? 'default' : 'outline'}
+                size="sm"
+                dataCY={`lung-3d-${structure.id}`}
+                aria-pressed={selected}
+                disabled={!implemented || model3dProgress !== null}
+                className="justify-start gap-2"
+                onClick={() =>
+                  setModel3dSelection(prev => ({ ...prev, [structure.id]: !prev[structure.id] }))
+                }
+              >
+                <span
+                  className="inline-block h-3 w-3 shrink-0 rounded-sm border border-black/30"
+                  style={{ backgroundColor: structure.colorHex }}
+                  aria-hidden="true"
+                />
+                <span className="truncate">
+                  {t(structure.labelKey)}
+                  {!implemented && (
+                    <span className="text-muted-foreground"> {t('model3dReserved')}</span>
+                  )}
+                </span>
+              </Button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="default"
+            size="sm"
+            dataCY="lung-3d-build"
+            disabled={model3dProgress !== null}
+            onClick={() => void buildModel3d()}
+          >
+            {model3dProgress
+              ? t('model3dBuilding', {
+                  done: model3dProgress.done,
+                  total: model3dProgress.total || '…',
+                })
+              : t('model3dBuild')}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            dataCY="lung-3d-clear"
+            disabled={model3dProgress !== null}
+            onClick={clearModel3d}
+          >
+            {t('model3dClear')}
+          </Button>
+        </div>
+        {model3dStatus && <p className="text-muted-foreground text-xs">{model3dStatus}</p>}
+        <p className="text-muted-foreground text-xs leading-snug">{t('model3dHelp')}</p>
       </div>
 
       <div className="flex flex-col gap-1 border-t border-secondary-light pt-2">

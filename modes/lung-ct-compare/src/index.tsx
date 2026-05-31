@@ -4,6 +4,8 @@ import { ToolbarService, utils } from '@ohif/core';
 import {
   registerMedSam2LungSegmentation,
   unregisterMedSam2LungSegmentation,
+  registerLungSurface3DModel,
+  unregisterLungSurface3DModel,
 } from '@ohif/extension-lung-ct-compare';
 import { id } from './id';
 import initToolGroups from '../../basic/src/initToolGroups';
@@ -64,6 +66,10 @@ export function onModeEnter({ servicesManager, extensionManager, commandsManager
   // to in-browser HU thresholds when the MedSAM2 service is not running.
   registerMedSam2LungSegmentation();
 
+  // Activate the surface-based 3D-model backend for the bottom volume viewport
+  // (reconstructs the segmented structures as colored 3D surfaces).
+  registerLungSurface3DModel();
+
   toolbarService.register(toolbarButtons);
 
   toolbarService.updateSection(TOOLBAR_SECTIONS.primary, [
@@ -114,6 +120,7 @@ export function onModeExit({ servicesManager }: withAppTypes) {
   } = servicesManager.services;
 
   unregisterMedSam2LungSegmentation();
+  unregisterLungSurface3DModel();
 
   uiDialogService.hideAll();
   uiModalService.hide();

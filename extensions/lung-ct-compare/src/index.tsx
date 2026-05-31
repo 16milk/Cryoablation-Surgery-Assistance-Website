@@ -26,6 +26,26 @@ export {
 } from './segmentation/medSam2SegmentationProvider';
 
 export {
+  getLung3DModelProvider,
+  setLung3DModelProvider,
+  registerLung3DChannel,
+  unregisterLung3DChannel,
+  getLung3DChannel,
+  getImplementedLung3DChannels,
+} from './model3d/lung3DModel';
+export type {
+  Lung3DModelProvider,
+  Lung3DChannelMaskGenerator,
+  Lung3DBuildContext,
+  Lung3DBuildResult,
+  Lung3DClearContext,
+} from './model3d/lung3DModel';
+export {
+  registerLungSurface3DModel,
+  unregisterLungSurface3DModel,
+} from './model3d/lungSurfaceModelProvider';
+
+export {
   mockIdentityDeformationField,
   createConstantDeformationField,
   getLungDeformationField,
