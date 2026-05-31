@@ -1,44 +1,80 @@
 import React from 'react';
 import PropTypes from 'prop-types';
+import classnames from 'classnames';
 
-import Table from '../Table';
-import TableHead from '../TableHead';
-import TableBody from '../TableBody';
-import TableRow from '../TableRow';
-import TableCell from '../TableCell';
+/**
+ * Width of each series-table column. Uses CSS grid track sizes (inline, so they
+ * are not subject to Tailwind's static class purging — the previous
+ * `w-1/${n}` approach silently lost its width when the column count changed).
+ * `minmax(0, …)` lets cells truncate instead of forcing the row wider.
+ */
+const columnTrack = (key: string): string => {
+  if (key === 'actions') {
+    return 'minmax(72px, max-content)';
+  }
+  if (key === 'description') {
+    return 'minmax(0, 3fr)';
+  }
+  return 'minmax(0, 1fr)';
+};
 
 const StudyListExpandedRow = ({ seriesTableColumns, seriesTableDataSource, children }) => {
-  return (
-    <div className="w-full bg-black py-4 pl-12 pr-2">
-      <div className="block">{children}</div>
-      <div className="mt-4">
-        <Table>
-          <TableHead>
-            <TableRow>
-              {Object.keys(seriesTableColumns).map(columnKey => {
-                return <TableCell key={columnKey}>{seriesTableColumns[columnKey]}</TableCell>;
-              })}
-            </TableRow>
-          </TableHead>
+  const columnKeys = Object.keys(seriesTableColumns);
+  const gridTemplateColumns = columnKeys.map(columnTrack).join(' ');
 
-          <TableBody>
-            {seriesTableDataSource.map((row, i) => (
-              <TableRow key={i}>
-                {Object.keys(row).map(cellKey => {
-                  const content = row[cellKey];
-                  return (
-                    <TableCell
-                      key={cellKey}
-                      className="truncate"
-                    >
-                      {content}
-                    </TableCell>
-                  );
-                })}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+  return (
+    <div className="bg-black w-full py-4 pl-12 pr-2">
+      <div className="block">{children}</div>
+
+      <div className="border-secondary-light mt-4 overflow-hidden rounded border">
+        {/* Header */}
+        <div
+          className="bg-secondary-dark text-secondary-light grid items-center text-sm font-semibold"
+          style={{ gridTemplateColumns }}
+        >
+          {columnKeys.map(columnKey => (
+            <div
+              key={columnKey}
+              className="truncate px-3 py-2"
+            >
+              {seriesTableColumns[columnKey]}
+            </div>
+          ))}
+        </div>
+
+        {/* Body — iterate by column key (not row key) so cells always align. */}
+        {seriesTableDataSource.length === 0 ? (
+          <div className="text-secondary-light px-3 py-3 text-sm">—</div>
+        ) : (
+          seriesTableDataSource.map((row, i) => (
+            <div
+              key={i}
+              className="border-secondary-light hover:bg-secondary-dark/60 grid items-center border-t text-sm text-white transition-colors"
+              style={{ gridTemplateColumns }}
+            >
+              {columnKeys.map(columnKey => {
+                const content = row[columnKey];
+                const isText = typeof content === 'string' || typeof content === 'number';
+                return (
+                  <div
+                    key={columnKey}
+                    className={classnames(
+                      'px-3 py-2',
+                      columnKey === 'actions'
+                        ? 'flex items-center justify-start'
+                        : isText
+                          ? 'truncate'
+                          : ''
+                    )}
+                    title={isText ? String(content) : undefined}
+                  >
+                    {content ?? ''}
+                  </div>
+                );
+              })}
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

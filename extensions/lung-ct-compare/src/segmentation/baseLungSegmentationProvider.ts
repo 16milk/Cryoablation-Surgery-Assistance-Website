@@ -40,6 +40,86 @@ export interface SliceContext {
 }
 
 /**
+ * Radius (px) of the marker disk stamped at a click. Guarantees the click is
+ * always clearly visible, even if the segmentation result is tiny or empty.
+ */
+const MIN_CLICK_RADIUS = 7;
+
+/** Paint a filled disk of `value` into `mask` centered at (cx, cy). */
+function stampDisk(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  radius: number
+): void {
+  const r2 = radius * radius;
+  const x0 = Math.max(0, cx - radius);
+  const x1 = Math.min(width - 1, cx + radius);
+  const y0 = Math.max(0, cy - radius);
+  const y1 = Math.min(height - 1, cy + radius);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - cy;
+    const row = y * width;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      if (dx * dx + dy * dy <= r2) {
+        mask[row + x] = 1;
+      }
+    }
+  }
+}
+
+/**
+ * Pick a good region-grow seed near a click. If the clicked pixel isn't in the
+ * structure's expected HU band (e.g. the user clicked slightly into air), search
+ * a small neighborhood for the nearest pixel that is, so near-misses still work.
+ */
+function snapSeed(
+  hu: Float32Array,
+  width: number,
+  height: number,
+  col: number,
+  row: number,
+  structureId: LungStructureId,
+  region?: Uint8Array
+): number {
+  const lo = structureId === 'iceBall' ? -400 : -150;
+  const hi = structureId === 'iceBall' ? -120 : 150;
+  const ok = (idx: number) => (!region || region[idx]) && hu[idx] >= lo && hu[idx] <= hi;
+
+  const idx0 = row * width + col;
+  if (ok(idx0)) {
+    return idx0;
+  }
+  const R = 5;
+  let best = -1;
+  let bestD = Infinity;
+  for (let dy = -R; dy <= R; dy++) {
+    const y = row + dy;
+    if (y < 0 || y >= height) {
+      continue;
+    }
+    for (let dx = -R; dx <= R; dx++) {
+      const x = col + dx;
+      if (x < 0 || x >= width) {
+        continue;
+      }
+      const idx = y * width + x;
+      if (ok(idx)) {
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          best = idx;
+        }
+      }
+    }
+  }
+  return best >= 0 ? best : idx0;
+}
+
+/**
  * Shared cornerstone wiring for the lung structure overlays: one labelmap
  * segmentation per display set, one segment per structure, recomputed per
  * visible slice and on scroll. Subclasses only implement `computeMasks` to turn
@@ -505,9 +585,9 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
   ): Promise<Uint8Array | null> {
     const { hu, width, height } = slice;
     const field = computeLungField(hu, width, height);
-    const seed = point[1] * width + point[0];
-    const tolerance = structureId === 'iceBall' ? 140 : 90;
-    const maxArea = structureId === 'iceBall' ? 30000 : 3000;
+    const seed = snapSeed(hu, width, height, point[0], point[1], structureId, field.lungRegion);
+    const tolerance = structureId === 'iceBall' ? 160 : 110;
+    const maxArea = structureId === 'iceBall' ? 30000 : 4000;
     return regionGrow(hu, width, height, seed, tolerance, field.lungRegion, maxArea);
   }
 
@@ -553,28 +633,34 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
       return;
     }
 
-    const mask = await this.segmentPointMask(slice, structureId, [col, row]);
-    if (!mask) {
-      return;
-    }
-
-    // Accumulate clicks: union with any existing manual mask for this slice.
+    const n = slice.width * slice.height;
     const key = this.manualKey(segmentationId, slice.imageId, structureId);
-    const existing = this.manualMasks.get(key);
-    if (existing) {
-      const merged = existing.slice();
+
+    // 1) Stamp a clearly visible marker at the click immediately, so the user
+    // gets instant feedback while the (possibly async) segmentation runs.
+    const before = this.manualMasks.get(key);
+    const marked = before ? before.slice() : new Uint8Array(n);
+    stampDisk(marked, slice.width, slice.height, col, row, MIN_CLICK_RADIUS);
+    this.manualMasks.set(key, marked);
+    this.manualStructures.add(structureId);
+    this.active.add(structureId);
+    void this.recompute(viewportId);
+
+    // 2) Refine with the precise segmentation (MedSAM2 or region-grow fallback),
+    // unioned into the accumulated mask for this slice.
+    const mask = await this.segmentPointMask(slice, structureId, [col, row]);
+    const merged = (this.manualMasks.get(key) ?? marked).slice();
+    if (mask) {
       const limit = Math.min(merged.length, mask.length);
       for (let i = 0; i < limit; i++) {
         if (mask[i]) {
           merged[i] = 1;
         }
       }
-      this.manualMasks.set(key, merged);
-    } else {
-      this.manualMasks.set(key, mask);
     }
-    this.manualStructures.add(structureId);
-    this.active.add(structureId);
+    // Always keep the visible marker, even if segmentation returned nothing.
+    stampDisk(merged, slice.width, slice.height, col, row, MIN_CLICK_RADIUS);
+    this.manualMasks.set(key, merged);
 
     await this.recompute(viewportId);
   }
