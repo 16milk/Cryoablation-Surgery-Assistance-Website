@@ -465,4 +465,11 @@ app.listen(PORT, () => {
   console.log(`  DICOMweb: http://localhost:${PORT}/dicomweb`);
   console.log(`  Upload:   POST http://localhost:${PORT}/api/upload`);
   console.log(`  Storage:  ${DICOM_DIR}`);
+}).on('error', err => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Stop the other process first:`);
+    console.error(`  lsof -ti :${PORT} | xargs kill -9`);
+    process.exit(1);
+  }
+  throw err;
 });
