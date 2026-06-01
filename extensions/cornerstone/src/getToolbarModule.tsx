@@ -12,6 +12,7 @@ import NavigationComponent from './components/NavigationComponent/NavigationComp
 import TrackingStatus from './components/TrackingStatus/TrackingStatus';
 import ViewportColorbarsContainer from './components/ViewportColorbar';
 import AdvancedRenderingControls from './components/AdvancedRenderingControls';
+import { getPropertiesForViewport } from './utils/getDataIdForViewport';
 
 const getDisabledState = (disabledText?: string) => ({
   disabled: true,
@@ -543,10 +544,10 @@ export default function getToolbarModule({ servicesManager, extensionManager }: 
 
         const propId = button.id;
 
-        const properties = viewport.getProperties();
         const camera = viewport.getCamera();
+        const properties = getPropertiesForViewport(viewport);
 
-        const prop = camera?.[propId] || properties?.[propId];
+        const prop = camera?.[propId] ?? properties?.[propId];
 
         if (!prop) {
           return {
