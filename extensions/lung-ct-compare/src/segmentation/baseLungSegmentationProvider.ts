@@ -6,7 +6,7 @@ import {
   utilities as csUtils,
 } from '@cornerstonejs/core';
 import { Enums as csToolsEnums, segmentation as cstSegmentation } from '@cornerstonejs/tools';
-import type { ServicesManager } from '@ohif/core';
+import type { CommandsManager, ServicesManager } from '@ohif/core';
 
 import {
   LUNG_STRUCTURES,
@@ -16,6 +16,13 @@ import {
 } from './lungSegmentation';
 import { SEGMENT_INDEX, computeLungField } from './lungThresholding';
 import { regionGrow } from './morphology';
+import { LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT } from '../hangingProtocol/lungCtCompare';
+import { Vec3, mapBaselineToCompare, mapCompareToBaseline } from '../registration/lungRegistration';
+import {
+  findNearestSliceIndexByAxis,
+  normalFromImagePlane,
+  stackCoordinate,
+} from '../utils/spatialSync';
 
 const { Labelmap } = csToolsEnums.SegmentationRepresentations;
 const { getCurrentLabelmapImageIdsForViewport, triggerSegmentationEvents } = cstSegmentation;
@@ -130,6 +137,7 @@ function snapSeed(
 export abstract class BaseLungSegmentationProvider implements LungSegmentationProvider {
   protected readonly active = new Set<LungStructureId>();
   protected servicesManager: ServicesManager | null = null;
+  protected commandsManager: CommandsManager | null = null;
 
   private readonly segIdPrefix: string;
   private readonly detachers = new Map<string, () => void>();
@@ -208,6 +216,7 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     this.pendingViewports.clear();
     this.generation.clear();
     this.servicesManager = null;
+    this.commandsManager = null;
     this.onDispose();
   }
 
@@ -505,9 +514,11 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
   enableClickPrompt(
     structureId: LungStructureId,
     viewportIds: string[],
-    servicesManager: ServicesManager
+    servicesManager: ServicesManager,
+    commandsManager?: CommandsManager
   ): void {
     this.servicesManager = servicesManager;
+    this.commandsManager = commandsManager ?? null;
     this.clickTarget = structureId;
     this.active.add(structureId);
     // Switch this structure to manual-only so auto false-positives don't mix in.
@@ -591,46 +602,86 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     return regionGrow(hu, width, height, seed, tolerance, field.lungRegion, maxArea);
   }
 
-  /** Convert a click into an image (col,row) point and segment around it. */
-  private async segmentAtPoint(
-    viewportId: string,
-    structureId: LungStructureId,
-    event: MouseEvent
-  ): Promise<void> {
-    const read = this.readSlice(viewportId);
-    if (!read) {
-      return;
+  private pairedViewport(viewportId: string): { targetId: string; forward: boolean } | null {
+    if (viewportId === LUNG_VIEWPORT_LEFT) {
+      return { targetId: LUNG_VIEWPORT_RIGHT, forward: true };
     }
-    const { slice, segmentationId } = read;
+    if (viewportId === LUNG_VIEWPORT_RIGHT) {
+      return { targetId: LUNG_VIEWPORT_LEFT, forward: false };
+    }
+    return null;
+  }
 
+  private registrationContext() {
+    const services = this.services();
+    const cornerstoneViewportService = services?.cornerstoneViewportService;
+    return {
+      baselineDisplaySetInstanceUID:
+        cornerstoneViewportService?.getViewportDisplaySets(LUNG_VIEWPORT_LEFT)?.[0]
+          ?.displaySetInstanceUID ?? null,
+      compareDisplaySetInstanceUID:
+        cornerstoneViewportService?.getViewportDisplaySets(LUNG_VIEWPORT_RIGHT)?.[0]
+          ?.displaySetInstanceUID ?? null,
+      servicesManager: this.servicesManager ?? undefined,
+    };
+  }
+
+  private async jumpViewportToWorld(viewportId: string, world: Vec3): Promise<void> {
     const services = this.services();
     const viewport = services?.cornerstoneViewportService?.getCornerstoneViewport(
       viewportId
     ) as unknown as {
-      canvasToWorld?: (p: [number, number]) => number[];
-      getCanvas?: () => HTMLCanvasElement;
+      getImageIds?: () => string[];
     } | null;
-    if (!viewport?.canvasToWorld) {
+    const imageIds = viewport?.getImageIds?.() ?? [];
+    if (!imageIds.length || !this.commandsManager) {
       return;
     }
 
-    const canvas = viewport.getCanvas?.();
-    const rect = (canvas ?? (event.currentTarget as HTMLElement))?.getBoundingClientRect?.();
-    if (!rect) {
+    const targetNormal = normalFromImagePlane(imageIds[0]);
+    if (!targetNormal) {
       return;
     }
-    const world = viewport.canvasToWorld([event.clientX - rect.left, event.clientY - rect.top]);
-    if (!world) {
-      return;
+
+    const targetCoord = stackCoordinate(world, targetNormal);
+    const { index } = findNearestSliceIndexByAxis(imageIds, targetNormal, targetCoord);
+    this.commandsManager.run({
+      commandName: 'jumpToImage',
+      commandOptions: {
+        imageIndex: index,
+        viewport: { id: viewportId },
+      },
+      context: 'CORNERSTONE',
+    });
+
+    await new Promise(resolve => {
+      if (typeof requestAnimationFrame === 'undefined') {
+        setTimeout(resolve, 0);
+      } else {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }
+    });
+  }
+
+  private async segmentWorldPoint(
+    viewportId: string,
+    structureId: LungStructureId,
+    world: Vec3
+  ): Promise<boolean> {
+    const read = this.readSlice(viewportId);
+    if (!read) {
+      return false;
     }
+    const { slice, segmentationId } = read;
+
     const ij = csUtils.worldToImageCoords(slice.imageId, world as csTypes.Point3);
     if (!ij) {
-      return;
+      return false;
     }
     const col = Math.round(ij[0]);
     const row = Math.round(ij[1]);
     if (col < 0 || col >= slice.width || row < 0 || row >= slice.height) {
-      return;
+      return false;
     }
 
     const n = slice.width * slice.height;
@@ -663,5 +714,55 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     this.manualMasks.set(key, merged);
 
     await this.recompute(viewportId);
+    return true;
+  }
+
+  /** Convert a click into an image point, then mirror nodules to the paired CT via VXM. */
+  private async segmentAtPoint(
+    viewportId: string,
+    structureId: LungStructureId,
+    event: MouseEvent
+  ): Promise<void> {
+    const services = this.services();
+    const viewport = services?.cornerstoneViewportService?.getCornerstoneViewport(
+      viewportId
+    ) as unknown as {
+      canvasToWorld?: (p: [number, number]) => number[];
+      getCanvas?: () => HTMLCanvasElement;
+    } | null;
+    if (!viewport?.canvasToWorld) {
+      return;
+    }
+
+    const canvas = viewport.getCanvas?.();
+    const rect = (canvas ?? (event.currentTarget as HTMLElement))?.getBoundingClientRect?.();
+    if (!rect) {
+      return;
+    }
+    const worldRaw = viewport.canvasToWorld([event.clientX - rect.left, event.clientY - rect.top]);
+    if (!worldRaw) {
+      return;
+    }
+    const world: Vec3 = [worldRaw[0], worldRaw[1], worldRaw[2]];
+    const didSegment = await this.segmentWorldPoint(viewportId, structureId, world);
+
+    if (!didSegment || structureId !== 'nodule') {
+      return;
+    }
+
+    const pair = this.pairedViewport(viewportId);
+    if (!pair) {
+      return;
+    }
+
+    const context = this.registrationContext();
+    const mappedWorld = pair.forward
+      ? mapBaselineToCompare(world, context)
+      : mapCompareToBaseline(world, context);
+
+    await this.ensureRepresentation(pair.targetId);
+    this.applySegmentStyles(pair.targetId);
+    await this.jumpViewportToWorld(pair.targetId, mappedWorld);
+    await this.segmentWorldPoint(pair.targetId, structureId, mappedWorld);
   }
 }

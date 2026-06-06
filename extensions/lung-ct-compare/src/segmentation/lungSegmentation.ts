@@ -99,7 +99,8 @@ export interface LungSegmentationProvider {
   enableClickPrompt?(
     structureId: LungStructureId,
     viewportIds: string[],
-    servicesManager: ServicesManager
+    servicesManager: ServicesManager,
+    commandsManager?: CommandsManager
   ): void;
   /** Disable click-to-prompt and detach listeners. */
   disableClickPrompt?(): void;

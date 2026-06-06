@@ -45,6 +45,7 @@ MEDSAM2_LOOP_PID=""
 MEDSAM2_DIR="$ROOT/medsam2_server"
 if [ -x "$MEDSAM2_DIR/.venv/bin/python" ]; then
   echo "  MedSAM2:  http://localhost:5200 (starting)"
+  export VXM_CHECKPOINT="${VXM_CHECKPOINT:-/Users/ykxcai/Desktop/cryo_lung_vxm_epoch_200.pth}"
   (
     while true; do
       echo "[dev-local] starting MedSAM2 service at $(date)"

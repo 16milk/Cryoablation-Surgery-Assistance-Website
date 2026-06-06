@@ -2,6 +2,7 @@ import { LungStructureId, setLungSegmentationProvider } from './lungSegmentation
 import { computeLungField, computeStructureMask } from './lungThresholding';
 import { BaseLungSegmentationProvider, SliceContext } from './baseLungSegmentationProvider';
 import { MedSam2Box, encodeHu, medsam2Health, medsam2Segment } from './medsam2Client';
+import { connectedComponents, keepComponents } from './morphology';
 
 /** Half-size (px) of the box hint sent alongside a click point to stabilize SAM. */
 const POINT_BOX_HALF = 48;
@@ -33,11 +34,7 @@ const BOX_PADDING = 6;
 /** Max cached slice masks (per provider) to bound memory during long sessions. */
 const MAX_CACHE = 256;
 
-function boundingBox(
-  mask: Uint8Array,
-  width: number,
-  height: number
-): MedSam2Box | null {
+function boundingBox(mask: Uint8Array, width: number, height: number): MedSam2Box | null {
   let minX = width;
   let minY = height;
   let maxX = -1;
@@ -78,6 +75,60 @@ function intersect(mask: Uint8Array, region: Uint8Array): Uint8Array {
     out[i] = mask[i] && region[i] ? 1 : 0;
   }
   return out;
+}
+
+function keepPromptComponent(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  point: [number, number],
+  structureId: LungStructureId
+): Uint8Array {
+  const cc = connectedComponents(mask, width, height);
+  if (cc.count === 0) {
+    return mask;
+  }
+
+  const [cx, cy] = point;
+  const centerIdx = Math.round(cy) * width + Math.round(cx);
+  const centerLabel = centerIdx >= 0 && centerIdx < cc.labels.length ? cc.labels[centerIdx] : 0;
+
+  let bestLabel = centerLabel;
+  let bestScore = centerLabel ? 0 : Infinity;
+  for (let label = 1; label <= cc.count; label++) {
+    const area = cc.areas[label];
+    const [minX, minY, maxX, maxY] = cc.bbox[label];
+    const bw = maxX - minX + 1;
+    const bh = maxY - minY + 1;
+    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
+    const fill = area / Math.max(1, bw * bh);
+
+    if (structureId === 'nodule') {
+      if (area < 3 || area > 2500 || aspect > 3.5 || fill < 0.2) {
+        continue;
+      }
+    }
+
+    if (label === centerLabel) {
+      bestLabel = label;
+      break;
+    }
+
+    const boxCx = (minX + maxX) / 2;
+    const boxCy = (minY + maxY) / 2;
+    const dx = boxCx - cx;
+    const dy = boxCy - cy;
+    const score = dx * dx + dy * dy;
+    if (score < bestScore) {
+      bestScore = score;
+      bestLabel = label;
+    }
+  }
+
+  if (!bestLabel) {
+    return new Uint8Array(width * height);
+  }
+  return keepComponents(cc, width, height, label => label === bestLabel);
 }
 
 /**
@@ -200,7 +251,8 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
           window: STRUCTURE_WINDOW[structureId],
         });
         const field = computeLungField(hu, width, height);
-        return intersect(raw, field.lungRegion);
+        const confined = intersect(raw, field.lungRegion);
+        return keepPromptComponent(confined, width, height, point, structureId);
       } catch {
         this.markUnavailable();
       }

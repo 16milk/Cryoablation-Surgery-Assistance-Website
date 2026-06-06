@@ -53,6 +53,10 @@ export {
   mapBaselineToCompare,
   mapCompareToBaseline,
 } from './registration/lungRegistration';
+export {
+  registerVxmLungRegistration,
+  unregisterVxmLungRegistration,
+} from './registration/vxmDeformationField';
 export type {
   Vec3,
   LungDeformationField,

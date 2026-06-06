@@ -19,11 +19,7 @@ import {
   normalFromImagePlane,
   stackCoordinate,
 } from '../utils/spatialSync';
-import {
-  Vec3,
-  mapBaselineToCompare,
-  mapCompareToBaseline,
-} from '../registration/lungRegistration';
+import { Vec3, mapBaselineToCompare, mapCompareToBaseline } from '../registration/lungRegistration';
 import {
   LUNG_COMPARE_PROTOCOL_ID,
   LUNG_COMPARE_STAGE_2UP_ID,
@@ -38,10 +34,7 @@ import {
   LungStructureId,
   getLungSegmentationProvider,
 } from '../segmentation/lungSegmentation';
-import {
-  getImplementedLung3DChannels,
-  getLung3DModelProvider,
-} from '../model3d/lung3DModel';
+import { getImplementedLung3DChannels, getLung3DModelProvider } from '../model3d/lung3DModel';
 
 const OUT_OF_RANGE_MM = 18;
 
@@ -82,10 +75,7 @@ function ctSliceCount(ds: {
 function ctDisplaySets(displaySetService) {
   return displaySetService.getActiveDisplaySets().filter(ds => {
     return (
-      ds.Modality === 'CT' &&
-      !ds.isOverlayDisplaySet &&
-      !ds.unsupported &&
-      ctSliceCount(ds) > 0
+      ds.Modality === 'CT' && !ds.isOverlayDisplaySet && !ds.unsupported && ctSliceCount(ds) > 0
     );
   });
 }
@@ -146,13 +136,11 @@ export default function LungComparePanel() {
   /** Re-render when display sets load or metadata updates so CT filters see numImageFrames etc. */
   const [, setDisplaySetsRev] = useState(0);
   useEffect(() => {
-    const sub = displaySetService.subscribe(
-      displaySetService.EVENTS.DISPLAY_SETS_CHANGED,
-      () => setDisplaySetsRev(n => n + 1)
+    const sub = displaySetService.subscribe(displaySetService.EVENTS.DISPLAY_SETS_CHANGED, () =>
+      setDisplaySetsRev(n => n + 1)
     );
-    const subAdded = displaySetService.subscribe(
-      displaySetService.EVENTS.DISPLAY_SETS_ADDED,
-      () => setDisplaySetsRev(n => n + 1)
+    const subAdded = displaySetService.subscribe(displaySetService.EVENTS.DISPLAY_SETS_ADDED, () =>
+      setDisplaySetsRev(n => n + 1)
     );
     return () => {
       sub.unsubscribe();
@@ -212,8 +200,7 @@ export default function LungComparePanel() {
               commandName: 'setHangingProtocol',
               commandOptions: {
                 protocolId: LUNG_COMPARE_PROTOCOL_ID,
-                stageId:
-                  saved === '2up' ? LUNG_COMPARE_STAGE_2UP_ID : LUNG_COMPARE_STAGE_3D_ID,
+                stageId: saved === '2up' ? LUNG_COMPARE_STAGE_2UP_ID : LUNG_COMPARE_STAGE_3D_ID,
               },
             });
           }
@@ -533,7 +520,8 @@ export default function LungComparePanel() {
           provider.enableClickPrompt?.(
             structureId,
             [LUNG_VIEWPORT_LEFT, LUNG_VIEWPORT_RIGHT],
-            servicesManager
+            servicesManager,
+            commandsManager
           );
         } catch (e) {
           console.warn('lung-ct-compare: enable click prompt failed', e);
@@ -541,7 +529,7 @@ export default function LungComparePanel() {
         return structureId;
       });
     },
-    [servicesManager]
+    [commandsManager, servicesManager]
   );
 
   const clearClicks = useCallback(() => {
@@ -784,11 +772,14 @@ export default function LungComparePanel() {
   }, [t, uiNotificationService]);
 
   return (
-    <div className="flex flex-col gap-3 p-2 text-sm" data-cy="lung-compare-panel">
-      <div className="font-semibold text-muted-foreground">{t('panelTitle')}</div>
+    <div
+      className="flex flex-col gap-3 p-2 text-sm"
+      data-cy="lung-compare-panel"
+    >
+      <div className="text-muted-foreground font-semibold">{t('panelTitle')}</div>
 
       {warning && (
-        <div className="rounded border border-amber-600/60 bg-amber-950/40 px-2 py-1.5 text-amber-100">
+        <div className="bg-amber-950/40 rounded border border-amber-600/60 px-2 py-1.5 text-amber-100">
           {warning}
         </div>
       )}
@@ -801,7 +792,7 @@ export default function LungComparePanel() {
 
       {options.length < 2 && (
         <div
-          className="rounded border border-amber-700/50 bg-amber-950/35 px-2 py-1.5 text-amber-100"
+          className="bg-amber-950/35 rounded border border-amber-700/50 px-2 py-1.5 text-amber-100"
           data-cy="lung-compare-insufficient-ct"
         >
           {t('needTwoCtSeries')}
@@ -809,7 +800,7 @@ export default function LungComparePanel() {
       )}
 
       <div className="flex flex-col gap-1">
-        <Label className="text-xs text-muted-foreground">{t('baselineLabel')}</Label>
+        <Label className="text-muted-foreground text-xs">{t('baselineLabel')}</Label>
         <Select
           value={baselineUid || ''}
           onValueChange={uid => {
@@ -824,7 +815,10 @@ export default function LungComparePanel() {
           </SelectTrigger>
           <SelectContent>
             {options.map(ds => (
-              <SelectItem key={ds.displaySetInstanceUID} value={ds.displaySetInstanceUID}>
+              <SelectItem
+                key={ds.displaySetInstanceUID}
+                value={ds.displaySetInstanceUID}
+              >
                 {describe(ds)}
               </SelectItem>
             ))}
@@ -833,7 +827,7 @@ export default function LungComparePanel() {
       </div>
 
       <div className="flex flex-col gap-1">
-        <Label className="text-xs text-muted-foreground">{t('compareLabel')}</Label>
+        <Label className="text-muted-foreground text-xs">{t('compareLabel')}</Label>
         <Select
           value={compareUid || ''}
           onValueChange={uid => {
@@ -848,7 +842,10 @@ export default function LungComparePanel() {
           </SelectTrigger>
           <SelectContent>
             {options.map(ds => (
-              <SelectItem key={ds.displaySetInstanceUID} value={ds.displaySetInstanceUID}>
+              <SelectItem
+                key={ds.displaySetInstanceUID}
+                value={ds.displaySetInstanceUID}
+              >
                 {describe(ds)}
               </SelectItem>
             ))}
@@ -889,10 +886,10 @@ export default function LungComparePanel() {
       </div>
 
       <div
-        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        className="border-secondary-light flex flex-col gap-2 border-t pt-2"
         data-cy="lung-compare-segmentation"
       >
-        <Label className="text-xs text-muted-foreground">{t('segmentationLabel')}</Label>
+        <Label className="text-muted-foreground text-xs">{t('segmentationLabel')}</Label>
         <div className="grid grid-cols-2 gap-2">
           {LUNG_STRUCTURES.map(structure => {
             const active = activeStructures[structure.id];
@@ -921,10 +918,10 @@ export default function LungComparePanel() {
       </div>
 
       <div
-        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        className="border-secondary-light flex flex-col gap-2 border-t pt-2"
         data-cy="lung-compare-click-prompt"
       >
-        <Label className="text-xs text-muted-foreground">{t('clickPromptLabel')}</Label>
+        <Label className="text-muted-foreground text-xs">{t('clickPromptLabel')}</Label>
         <div className="grid grid-cols-2 gap-2">
           {LUNG_STRUCTURES.filter(s => s.id === 'nodule' || s.id === 'iceBall').map(structure => {
             const active = clickTarget === structure.id;
@@ -964,10 +961,10 @@ export default function LungComparePanel() {
       </div>
 
       <div
-        className="flex flex-col gap-2 border-t border-secondary-light pt-2"
+        className="border-secondary-light flex flex-col gap-2 border-t pt-2"
         data-cy="lung-compare-3d-model"
       >
-        <Label className="text-xs text-muted-foreground">{t('model3dLabel')}</Label>
+        <Label className="text-muted-foreground text-xs">{t('model3dLabel')}</Label>
         <div className="grid grid-cols-2 gap-2">
           {LUNG_STRUCTURES.map(structure => {
             const implemented = model3dChannels.current.includes(structure.id);
@@ -1032,8 +1029,8 @@ export default function LungComparePanel() {
         <p className="text-muted-foreground text-xs leading-snug">{t('model3dHelp')}</p>
       </div>
 
-      <div className="flex flex-col gap-1 border-t border-secondary-light pt-2">
-        <Label className="text-xs text-muted-foreground">{t('layoutLabel')}</Label>
+      <div className="border-secondary-light flex flex-col gap-1 border-t pt-2">
+        <Label className="text-muted-foreground text-xs">{t('layoutLabel')}</Label>
         <Select
           value={layoutChoice}
           onValueChange={(value: '3d' | '2up') => {
@@ -1043,13 +1040,15 @@ export default function LungComparePanel() {
               commandName: 'setHangingProtocol',
               commandOptions: {
                 protocolId: LUNG_COMPARE_PROTOCOL_ID,
-                stageId:
-                  value === '2up' ? LUNG_COMPARE_STAGE_2UP_ID : LUNG_COMPARE_STAGE_3D_ID,
+                stageId: value === '2up' ? LUNG_COMPARE_STAGE_2UP_ID : LUNG_COMPARE_STAGE_3D_ID,
               },
             });
           }}
         >
-          <SelectTrigger className="w-full" data-cy="lung-compare-layout-select">
+          <SelectTrigger
+            className="w-full"
+            data-cy="lung-compare-layout-select"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1059,11 +1058,18 @@ export default function LungComparePanel() {
         </Select>
       </div>
 
-      <div className="flex items-center justify-between gap-2 border-t border-secondary-light pt-2">
-        <Label htmlFor="lung-sync" className="text-xs">
+      <div className="border-secondary-light flex items-center justify-between gap-2 border-t pt-2">
+        <Label
+          htmlFor="lung-sync"
+          className="text-xs"
+        >
           {t('syncToggle')}
         </Label>
-        <Switch id="lung-sync" checked={syncEnabled} onCheckedChange={setSyncEnabled} />
+        <Switch
+          id="lung-sync"
+          checked={syncEnabled}
+          onCheckedChange={setSyncEnabled}
+        />
       </div>
 
       <p className="text-muted-foreground text-xs leading-snug">{t('footerHelp')}</p>
