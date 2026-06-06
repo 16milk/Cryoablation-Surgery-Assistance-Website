@@ -37,6 +37,132 @@ provided by the <a href="https://ohif.org/">Open Health Imaging Foundation (OHIF
 <!-- [![All Contributors](https://img.shields.io/badge/all_contributors-10-orange.svg?style=flat-square)](#contributors) -->
 <!-- prettier-ignore-end -->
 
+## MedView 本地快速开始
+
+本仓库基于 OHIF Viewer 定制，新增了本地 DICOM 上传、SQLite DICOMweb 后端，以及面向肺结节随访/消融场景的肺 CT 对比、分割、配准和三维展示功能。
+
+### 环境要求
+
+- Node.js 22.5.0 或更高版本（本地 SQLite 后端使用 Node 内置 `node:sqlite`）
+- Yarn 1.20.0 或更高版本
+- Python 3.10 或更高版本（可选，仅 MedSAM2 分割与 VoxelMorph 配准服务需要）
+- macOS / Linux / Windows 均可运行前端；AI 推理推荐 `cuda`、Apple `mps` 或 CPU
+
+### 第一次拉取后的安装
+
+```bash
+git clone https://github.com/16milk/Cryoablation-Surgery-Assistance-Website.git
+cd Cryoablation-Surgery-Assistance-Website
+
+# 启用 Yarn Workspaces 并安装前端依赖
+yarn config set workspaces-experimental true
+yarn install --frozen-lockfile
+
+# 安装本地 DICOMweb/SQLite 后端依赖
+yarn server:install
+```
+
+### 可选：配置 MedSAM2 与 VXM 推理服务
+
+如果只需要上传和浏览 DICOM，可以跳过本节。若要使用肺结节点击精细分割、左右 CT 结节映射和形变场配准，请配置 `medsam2_server`：
+
+```bash
+cd medsam2_server
+python -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+pip install torch torchvision
+pip install "git+https://github.com/facebookresearch/sam2.git"
+
+# MedSAM2 权重与配置，按实际下载位置修改
+export MEDSAM2_CHECKPOINT=/abs/path/to/MedSAM2_latest.pt
+export MEDSAM2_CONFIG=configs/sam2.1/sam2.1_hiera_t.yaml
+
+# VoxelMorph 肺配准权重，默认脚本会尝试使用桌面这个路径
+export VXM_CHECKPOINT=/Users/ykxcai/Desktop/cryo_lung_vxm_epoch_200.pth
+
+cd ..
+```
+
+常用可选项：
+
+```bash
+export MEDSAM2_DEVICE=mps    # cuda | mps | cpu
+export VXM_DEVICE=mps        # cuda | mps | cpu
+export VXM_FLOW_SCALE=1.0
+```
+
+更详细的推理服务 API 与调参说明见 `medsam2_server/README.md`。
+
+### 运行
+
+推荐一键启动：
+
+```bash
+yarn dev:local
+```
+
+该命令会：
+
+- 自动启动本地 DICOMweb/SQLite 后端：`http://localhost:5100`
+- 使用本地数据源配置启动 OHIF 前端：`http://localhost:3000`
+- 如果检测到 `medsam2_server/.venv/bin/python`，自动启动 MedSAM2/VXM 推理服务：`http://localhost:5200`
+
+也可以分开启动：
+
+```bash
+# 终端 1：本地 DICOMweb/SQLite 后端
+yarn server:start
+
+# 终端 2：前端
+cd platform/app
+cross-env APP_CONFIG=config/local_sqlite.js yarn run dev
+
+# 终端 3：AI 推理服务（可选）
+cd medsam2_server
+source .venv/bin/activate
+python app.py
+```
+
+启动后打开 `http://localhost:3000`。可以在数据列表中点击“添加数据”上传本地 DICOM 文件或文件夹，上传后的数据会保存到 `server/data/`，并通过本地 DICOMweb 接口加载。
+
+### 肺 CT 功能介绍
+
+肺 CT 相关功能集中在 `lung-ct-compare` 模式中，工作列表中显示为“肺结节 CT 对比 / Lung Nodule CT Compare”。典型使用流程如下：
+
+1. 上传或接入包含至少两个 CT 序列的同一检查。
+2. 在工作列表选择“肺结节 CT 对比”模式打开。
+3. 在左侧肺 CT 面板中选择基准序列和对比序列。
+4. 使用左右双窗同步浏览，必要时切换“双窗 + 底部三维”或“仅双窗对比”布局。
+5. 使用点击精确分割标记结节或冰球，系统会在配准后尝试同步到另一侧 CT。
+
+已实现的肺 CT 能力：
+
+- **左右 CT 对比布局**：同一检查内两个 CT 序列并排显示，支持交换左右序列、复制分享链接、记忆布局偏好。
+- **肺结构分割叠加**：支持肺实质、血管、结节、冰球等结构的彩色 labelmap 叠加；MedSAM2 可用时使用模型精修，不可用时回退到浏览器内 HU 阈值算法。
+- **点击精确分割**：在任一 CT 上点击结节/冰球后，会生成局部 ROI、黄色点击中心和红色/紫色分割结果；ROI 直径可用滑块实时调整。
+- **精细结节分割优化**：点击分割时先裁剪并放大结节 ROI 再送入 MedSAM2，随后贴回原图，并进行孔洞填充、边界平滑和连通域筛选，提升小结节边缘质量。
+- **VoxelMorph 形变场配准**：前端将基准和对比 CT 下采样到 VXM 输入网格，后端推理得到 DICOM LPS 毫米位移场，用于结节点位映射和切片同步。
+- **双侧结节同步显示**：点击一侧结节后，系统会通过形变场估计另一侧对应位置，自动跳转到相关层面并尝试显示对应结节 ROI/分割。
+- **三维展示**：可在底部 3D 视图生成肺 CT 相关结构的三维模型，辅助理解空间关系。
+
+常用访问形式：
+
+```text
+http://localhost:3000/lung-ct-compare/dicomweb?StudyInstanceUIDs=<StudyUID>
+```
+
+也可以预选左右序列：
+
+```text
+http://localhost:3000/lung-ct-compare/dicomweb?StudyInstanceUIDs=<StudyUID>&baselineSeriesUID=<SeriesA>&compareSeriesUID=<SeriesB>
+```
+
+如果 AI 服务未启动，肺 CT 模式仍可使用基础浏览、布局、上传数据和阈值分割；MedSAM2/VXM 相关能力会自动降级或等待服务可用。
+
+---
+
 
 |     |  | |
 | :-: | :---  | :--- |
