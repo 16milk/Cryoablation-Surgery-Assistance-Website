@@ -2,7 +2,7 @@ import { LungStructureId, setLungSegmentationProvider } from './lungSegmentation
 import { computeLungField, computeStructureMask } from './lungThresholding';
 import { BaseLungSegmentationProvider, SliceContext } from './baseLungSegmentationProvider';
 import { MedSam2Box, encodeHu, medsam2Health, medsam2Segment } from './medsam2Client';
-import { connectedComponents, keepComponents } from './morphology';
+import { close, connectedComponents, fillHoles, keepComponents, open } from './morphology';
 
 const SEG_ID_PREFIX = 'lungct-medsam2::';
 
@@ -74,12 +74,25 @@ function intersect(mask: Uint8Array, region: Uint8Array): Uint8Array {
   return out;
 }
 
+/**
+ * Cosmetic clean-up of a lesion mask: fill interior holes and run a 1px
+ * morphological close to smooth jagged single-pixel staircases on the border.
+ * An opening removes any thin spurs without eating into the body of the nodule.
+ */
+function smoothMask(mask: Uint8Array, width: number, height: number): Uint8Array {
+  let out = fillHoles(mask, width, height);
+  out = close(out, width, height, 1);
+  out = open(out, width, height, 1);
+  return fillHoles(out, width, height);
+}
+
 function keepPromptComponent(
   mask: Uint8Array,
   width: number,
   height: number,
   point: [number, number],
-  structureId: LungStructureId
+  structureId: LungStructureId,
+  maxArea = 2500
 ): Uint8Array {
   const cc = connectedComponents(mask, width, height);
   if (cc.count === 0) {
@@ -101,7 +114,7 @@ function keepPromptComponent(
     const fill = area / Math.max(1, bw * bh);
 
     if (structureId === 'nodule') {
-      if (area < 3 || area > 2500 || aspect > 3.5 || fill < 0.2) {
+      if (area < 3 || area > maxArea || aspect > 3.5 || fill < 0.2) {
         continue;
       }
     }
@@ -219,43 +232,97 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
   }
 
   /**
-   * Click-to-prompt: send the clicked point (plus a small box hint) to MedSAM2
-   * for a precise mask of that single lesion. Falls back to the model-free
-   * region grow (base implementation) when the service is unavailable.
+   * Click-to-prompt: crop a zoomed-in patch around the clicked lesion and send
+   * *that* to MedSAM2, then paste the mask back into full-slice coordinates.
+   *
+   * Sending the whole 512² slice forces SAM to resize the entire image to its
+   * internal resolution, so a small nodule is segmented at very few effective
+   * pixels (coarse, jagged border). Cropping the ROI means the lesion fills the
+   * model input, giving a much finer, smoother boundary. Falls back to the
+   * model-free region grow (base implementation) when the service is down.
    */
   protected async segmentPointMask(
     slice: SliceContext,
     structureId: LungStructureId,
     point: [number, number]
   ): Promise<Uint8Array | null> {
-    const { hu, width, height } = slice;
     if (await this.ensureAvailable()) {
-      const [col, row] = point;
-      const half = Math.max(16, Math.round(this.clickPromptRoiSizePx / 2));
-      const box: MedSam2Box = [
-        Math.max(0, col - half),
-        Math.max(0, row - half),
-        Math.min(width - 1, col + half),
-        Math.min(height - 1, row + half),
-      ];
-      try {
-        const raw = await medsam2Segment({
-          width,
-          height,
-          huBase64: encodeHu(hu),
-          structure: structureId,
-          points: [[col, row, 1]],
-          box,
-          window: STRUCTURE_WINDOW[structureId],
-        });
-        const field = computeLungField(hu, width, height);
-        const confined = intersect(raw, field.lungRegion);
-        return keepPromptComponent(confined, width, height, point, structureId);
-      } catch {
-        this.markUnavailable();
+      const refined = await this.segmentPointViaCrop(slice, structureId, point);
+      if (refined) {
+        return refined;
       }
     }
     return super.segmentPointMask(slice, structureId, point);
+  }
+
+  /** Crop → zoomed model inference → paste back → confine → smooth. */
+  private async segmentPointViaCrop(
+    slice: SliceContext,
+    structureId: LungStructureId,
+    point: [number, number]
+  ): Promise<Uint8Array | null> {
+    const { hu, width, height } = slice;
+    const [col, row] = point;
+    const roiHalf = Math.max(12, Math.round(this.clickPromptRoiSizePx / 2));
+    // Crop a bit wider than the ROI so the model has surrounding context.
+    const cropHalf = Math.min(Math.round(roiHalf * 1.4), 180);
+    const x0 = Math.max(0, col - cropHalf);
+    const y0 = Math.max(0, row - cropHalf);
+    const x1 = Math.min(width - 1, col + cropHalf);
+    const y1 = Math.min(height - 1, row + cropHalf);
+    const cw = x1 - x0 + 1;
+    const ch = y1 - y0 + 1;
+    if (cw < 12 || ch < 12) {
+      return null;
+    }
+
+    const cropHu = new Float32Array(cw * ch);
+    for (let y = 0; y < ch; y++) {
+      const srcStart = (y + y0) * width + x0;
+      cropHu.set(hu.subarray(srcStart, srcStart + cw), y * cw);
+    }
+
+    const pcol = col - x0;
+    const prow = row - y0;
+    const box: MedSam2Box = [
+      Math.max(0, pcol - roiHalf),
+      Math.max(0, prow - roiHalf),
+      Math.min(cw - 1, pcol + roiHalf),
+      Math.min(ch - 1, prow + roiHalf),
+    ];
+
+    try {
+      const cropMask = await medsam2Segment({
+        width: cw,
+        height: ch,
+        huBase64: encodeHu(cropHu),
+        structure: structureId,
+        points: [[pcol, prow, 1]],
+        box,
+        window: STRUCTURE_WINDOW[structureId],
+      });
+
+      const full = new Uint8Array(width * height);
+      for (let y = 0; y < ch; y++) {
+        const dstStart = (y + y0) * width + x0;
+        const srcStart = y * cw;
+        for (let x = 0; x < cw; x++) {
+          if (cropMask[srcStart + x]) {
+            full[dstStart + x] = 1;
+          }
+        }
+      }
+
+      const field = computeLungField(hu, width, height);
+      const confined = intersect(full, field.lungRegion);
+      const smoothed = smoothMask(confined, width, height);
+      // A full ROI disc is the upper bound on a believable single lesion.
+      const maxArea = Math.round(Math.PI * roiHalf * roiHalf) + 64;
+      return keepPromptComponent(smoothed, width, height, point, structureId, maxArea);
+    } catch {
+      this.markUnavailable();
+      return null;
+    }
   }
 
   protected onDispose(): void {

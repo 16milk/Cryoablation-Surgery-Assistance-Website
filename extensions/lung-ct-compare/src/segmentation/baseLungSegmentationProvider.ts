@@ -27,6 +27,11 @@ import {
 const { Labelmap } = csToolsEnums.SegmentationRepresentations;
 const { getCurrentLabelmapImageIdsForViewport, triggerSegmentationEvents } = cstSegmentation;
 
+const CLICK_ROI_SEGMENT_INDEX = 5;
+const CLICK_ROI_COLOR: csTypes.Color = [0, 255, 255, 255];
+const CLICK_MARKER_SEGMENT_INDEX = 6;
+const CLICK_MARKER_COLOR: csTypes.Color = [255, 235, 59, 255];
+
 export function firstNumber(...values: Array<number | undefined | null>): number | undefined {
   for (const v of values) {
     if (typeof v === 'number' && Number.isFinite(v)) {
@@ -46,11 +51,8 @@ export interface SliceContext {
   height: number;
 }
 
-/**
- * Radius (px) of the marker disk stamped at a click. Guarantees the click is
- * always clearly visible, even if the segmentation result is tiny or empty.
- */
-const MIN_CLICK_RADIUS = 7;
+/** Radius (px) of the small center marker stamped at a click. */
+const MIN_CLICK_RADIUS = 3;
 
 /** Paint a filled disk of `value` into `mask` centered at (cx, cy). */
 function stampDisk(
@@ -76,6 +78,40 @@ function stampDisk(
       }
     }
   }
+}
+
+function circleMask(
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  diameter: number,
+  outlineOnly: boolean
+): Uint8Array {
+  const out = new Uint8Array(width * height);
+  const half = Math.max(1, Math.round(diameter / 2));
+  const x0 = Math.max(0, cx - half);
+  const x1 = Math.min(width - 1, cx + half);
+  const y0 = Math.max(0, cy - half);
+  const y1 = Math.min(height - 1, cy + half);
+  const thickness = Math.max(2, Math.round(diameter / 64));
+  const outer = half * half;
+  const inner = Math.max(0, half - thickness) * Math.max(0, half - thickness);
+
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - cy;
+    const row = y * width;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      const d2 = dx * dx + dy * dy;
+      const inside = d2 <= outer;
+      const onBorder = inside && d2 >= inner;
+      if (inside && (!outlineOnly || onBorder)) {
+        out[row + x] = 1;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -138,7 +174,7 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
   protected readonly active = new Set<LungStructureId>();
   protected servicesManager: ServicesManager | null = null;
   protected commandsManager: CommandsManager | null = null;
-  protected clickPromptRoiSizePx = 96;
+  protected clickPromptRoiSizePx = 80;
 
   private readonly segIdPrefix: string;
   private readonly detachers = new Map<string, () => void>();
@@ -152,6 +188,12 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
   // `${segmentationId}::${imageId}::${structureId}`. A structure with any manual
   // mask switches to "manual only" (auto-detection suppressed) until cleared.
   private readonly manualMasks = new Map<string, Uint8Array>();
+  private readonly roiMasks = new Map<string, Uint8Array>();
+  private readonly markerMasks = new Map<string, Uint8Array>();
+  private readonly promptCenters = new Map<
+    string,
+    { width: number; height: number; col: number; row: number }
+  >();
   private readonly manualStructures = new Set<LungStructureId>();
   private clickTarget: LungStructureId | null = null;
   private readonly clickDetachers = new Map<string, () => void>();
@@ -208,6 +250,9 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     this.detachClickListeners();
     this.clickTarget = null;
     this.manualMasks.clear();
+    this.roiMasks.clear();
+    this.markerMasks.clear();
+    this.promptCenters.clear();
     this.manualStructures.clear();
     this.active.clear();
     if (this.rafId != null && typeof cancelAnimationFrame !== 'undefined') {
@@ -263,6 +308,8 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
         const index = SEGMENT_INDEX[structure.id];
         segments[index] = { label: structure.id, active: index === 1 };
       }
+      segments[CLICK_ROI_SEGMENT_INDEX] = { label: 'click ROI', active: false };
+      segments[CLICK_MARKER_SEGMENT_INDEX] = { label: 'click marker', active: false };
       await segmentationService.createLabelmapForDisplaySet(displaySet, {
         segmentationId,
         label: 'Lung structures',
@@ -312,6 +359,30 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
         this.active.has(structure.id)
       );
     }
+    segmentationService.setSegmentColor(
+      viewportId,
+      segmentationId,
+      CLICK_ROI_SEGMENT_INDEX,
+      CLICK_ROI_COLOR
+    );
+    segmentationService.setSegmentVisibility(
+      viewportId,
+      segmentationId,
+      CLICK_ROI_SEGMENT_INDEX,
+      true
+    );
+    segmentationService.setSegmentColor(
+      viewportId,
+      segmentationId,
+      CLICK_MARKER_SEGMENT_INDEX,
+      CLICK_MARKER_COLOR
+    );
+    segmentationService.setSegmentVisibility(
+      viewportId,
+      segmentationId,
+      CLICK_MARKER_SEGMENT_INDEX,
+      true
+    );
   }
 
   /** Read the currently displayed slice of `viewportId` as HU values. */
@@ -440,6 +511,28 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
       for (let i = 0; i < limit; i++) {
         if (mask[i]) {
           segVoxel.setAtIndex(i, index);
+        }
+      }
+    }
+    for (const [key, mask] of this.roiMasks) {
+      if (!key.startsWith(`${segmentationId}::${slice.imageId}::`)) {
+        continue;
+      }
+      const limit = Math.min(n, mask.length);
+      for (let i = 0; i < limit; i++) {
+        if (mask[i]) {
+          segVoxel.setAtIndex(i, CLICK_ROI_SEGMENT_INDEX);
+        }
+      }
+    }
+    for (const [key, mask] of this.markerMasks) {
+      if (!key.startsWith(`${segmentationId}::${slice.imageId}::`)) {
+        continue;
+      }
+      const limit = Math.min(n, mask.length);
+      for (let i = 0; i < limit; i++) {
+        if (mask[i]) {
+          segVoxel.setAtIndex(i, CLICK_MARKER_SEGMENT_INDEX);
         }
       }
     }
@@ -576,6 +669,21 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
         this.manualMasks.delete(key);
       }
     }
+    for (const key of [...this.roiMasks.keys()]) {
+      if (key.endsWith(`::${structureId}`)) {
+        this.roiMasks.delete(key);
+      }
+    }
+    for (const key of [...this.markerMasks.keys()]) {
+      if (key.endsWith(`::${structureId}`)) {
+        this.markerMasks.delete(key);
+      }
+    }
+    for (const key of [...this.promptCenters.keys()]) {
+      if (key.endsWith(`::${structureId}`)) {
+        this.promptCenters.delete(key);
+      }
+    }
     this.manualStructures.delete(structureId);
     [...this.clickDetachers.keys()].forEach(id => void this.recompute(id));
   }
@@ -585,6 +693,20 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
       return;
     }
     this.clickPromptRoiSizePx = Math.max(32, Math.min(256, Math.round(sizePx)));
+    for (const [key, prompt] of this.promptCenters) {
+      this.roiMasks.set(
+        key,
+        circleMask(
+          prompt.width,
+          prompt.height,
+          prompt.col,
+          prompt.row,
+          this.clickPromptRoiSizePx,
+          true
+        )
+      );
+    }
+    [...this.clickDetachers.keys()].forEach(id => void this.recompute(id));
   }
 
   private detachClickListeners(): void {
@@ -694,13 +816,32 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
 
     const n = slice.width * slice.height;
     const key = this.manualKey(segmentationId, slice.imageId, structureId);
+    const roiOutline = circleMask(
+      slice.width,
+      slice.height,
+      col,
+      row,
+      this.clickPromptRoiSizePx,
+      true
+    );
+    const roiFill = circleMask(
+      slice.width,
+      slice.height,
+      col,
+      row,
+      this.clickPromptRoiSizePx,
+      false
+    );
 
-    // 1) Stamp a clearly visible marker at the click immediately, so the user
-    // gets instant feedback while the (possibly async) segmentation runs.
+    // 1) Show ROI and center marker immediately, without pretending the marker
+    // is the actual nodule mask.
     const before = this.manualMasks.get(key);
-    const marked = before ? before.slice() : new Uint8Array(n);
-    stampDisk(marked, slice.width, slice.height, col, row, MIN_CLICK_RADIUS);
-    this.manualMasks.set(key, marked);
+    this.manualMasks.set(key, before ? before.slice() : new Uint8Array(n));
+    this.roiMasks.set(key, roiOutline);
+    this.promptCenters.set(key, { width: slice.width, height: slice.height, col, row });
+    const marker = new Uint8Array(n);
+    stampDisk(marker, slice.width, slice.height, col, row, MIN_CLICK_RADIUS);
+    this.markerMasks.set(key, marker);
     this.manualStructures.add(structureId);
     this.active.add(structureId);
     void this.recompute(viewportId);
@@ -708,17 +849,15 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     // 2) Refine with the precise segmentation (MedSAM2 or region-grow fallback),
     // unioned into the accumulated mask for this slice.
     const mask = await this.segmentPointMask(slice, structureId, [col, row]);
-    const merged = (this.manualMasks.get(key) ?? marked).slice();
+    const merged = (this.manualMasks.get(key) ?? new Uint8Array(n)).slice();
     if (mask) {
       const limit = Math.min(merged.length, mask.length);
       for (let i = 0; i < limit; i++) {
-        if (mask[i]) {
+        if (mask[i] && roiFill[i]) {
           merged[i] = 1;
         }
       }
     }
-    // Always keep the visible marker, even if segmentation returned nothing.
-    stampDisk(merged, slice.width, slice.height, col, row, MIN_CLICK_RADIUS);
     this.manualMasks.set(key, merged);
 
     await this.recompute(viewportId);
