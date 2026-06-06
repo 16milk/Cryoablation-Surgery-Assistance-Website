@@ -106,6 +106,8 @@ export interface LungSegmentationProvider {
   disableClickPrompt?(): void;
   /** Clear the click-prompted masks for a structure (reverts to auto-detection). */
   clearClickPrompt?(structureId: LungStructureId): void;
+  /** Update the square ROI side length (px) used for click-prompt segmentation. */
+  setClickPromptRoiSize?(sizePx: number): void;
   /** Whether click-to-prompt is meaningful for a structure (compact lesions). */
   supportsClickPrompt?(structureId: LungStructureId): boolean;
 }

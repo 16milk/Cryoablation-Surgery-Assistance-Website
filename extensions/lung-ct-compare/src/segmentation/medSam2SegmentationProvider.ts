@@ -4,9 +4,6 @@ import { BaseLungSegmentationProvider, SliceContext } from './baseLungSegmentati
 import { MedSam2Box, encodeHu, medsam2Health, medsam2Segment } from './medsam2Client';
 import { connectedComponents, keepComponents } from './morphology';
 
-/** Half-size (px) of the box hint sent alongside a click point to stabilize SAM. */
-const POINT_BOX_HALF = 48;
-
 const SEG_ID_PREFIX = 'lungct-medsam2::';
 
 /** CT window [center, width] per structure used to normalize HU for the model. */
@@ -234,11 +231,12 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
     const { hu, width, height } = slice;
     if (await this.ensureAvailable()) {
       const [col, row] = point;
+      const half = Math.max(16, Math.round(this.clickPromptRoiSizePx / 2));
       const box: MedSam2Box = [
-        Math.max(0, col - POINT_BOX_HALF),
-        Math.max(0, row - POINT_BOX_HALF),
-        Math.min(width - 1, col + POINT_BOX_HALF),
-        Math.min(height - 1, row + POINT_BOX_HALF),
+        Math.max(0, col - half),
+        Math.max(0, row - half),
+        Math.min(width - 1, col + half),
+        Math.min(height - 1, row + half),
       ];
       try {
         const raw = await medsam2Segment({

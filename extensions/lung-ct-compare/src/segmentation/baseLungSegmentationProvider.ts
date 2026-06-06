@@ -138,6 +138,7 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
   protected readonly active = new Set<LungStructureId>();
   protected servicesManager: ServicesManager | null = null;
   protected commandsManager: CommandsManager | null = null;
+  protected clickPromptRoiSizePx = 96;
 
   private readonly segIdPrefix: string;
   private readonly detachers = new Map<string, () => void>();
@@ -577,6 +578,13 @@ export abstract class BaseLungSegmentationProvider implements LungSegmentationPr
     }
     this.manualStructures.delete(structureId);
     [...this.clickDetachers.keys()].forEach(id => void this.recompute(id));
+  }
+
+  setClickPromptRoiSize(sizePx: number): void {
+    if (!Number.isFinite(sizePx)) {
+      return;
+    }
+    this.clickPromptRoiSizePx = Math.max(32, Math.min(256, Math.round(sizePx)));
   }
 
   private detachClickListeners(): void {

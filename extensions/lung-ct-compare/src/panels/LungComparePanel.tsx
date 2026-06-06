@@ -37,6 +37,7 @@ import {
 import { getImplementedLung3DChannels, getLung3DModelProvider } from '../model3d/lung3DModel';
 
 const OUT_OF_RANGE_MM = 18;
+const CLICK_PROMPT_ROI_OPTIONS = [64, 96, 128, 160];
 
 const LAYOUT_PREF_STORAGE_KEY = 'ohif.lungCtCompare.layoutPreference';
 
@@ -116,6 +117,8 @@ export default function LungComparePanel() {
 
   /** Structure currently armed for click-to-prompt segmentation (null = off). */
   const [clickTarget, setClickTarget] = useState<LungStructureId | null>(null);
+  /** Square ROI side length (px) sent as the prompt box around each click. */
+  const [clickPromptRoiSize, setClickPromptRoiSize] = useState(96);
 
   /** Channels selectable for the bottom 3D model (only implemented ones). */
   const model3dChannels = useRef(getImplementedLung3DChannels());
@@ -510,6 +513,7 @@ export default function LungComparePanel() {
   const toggleClickTarget = useCallback(
     (structureId: LungStructureId) => {
       const provider = getLungSegmentationProvider();
+      provider.setClickPromptRoiSize?.(clickPromptRoiSize);
       setClickTarget(prev => {
         if (prev === structureId) {
           provider.disableClickPrompt?.();
@@ -529,8 +533,12 @@ export default function LungComparePanel() {
         return structureId;
       });
     },
-    [commandsManager, servicesManager]
+    [clickPromptRoiSize, commandsManager, servicesManager]
   );
+
+  useEffect(() => {
+    getLungSegmentationProvider().setClickPromptRoiSize?.(clickPromptRoiSize);
+  }, [clickPromptRoiSize]);
 
   const clearClicks = useCallback(() => {
     if (!clickTarget) {
@@ -957,6 +965,30 @@ export default function LungComparePanel() {
             {t('clickPromptClear')}
           </Button>
         )}
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-muted-foreground text-xs">{t('clickPromptRoiSize')}</Label>
+          <Select
+            value={String(clickPromptRoiSize)}
+            onValueChange={value => setClickPromptRoiSize(Number(value))}
+          >
+            <SelectTrigger
+              className="w-28"
+              data-cy="lung-click-roi-size"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CLICK_PROMPT_ROI_OPTIONS.map(size => (
+                <SelectItem
+                  key={size}
+                  value={String(size)}
+                >
+                  {t('clickPromptRoiSizePx', { size })}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <p className="text-muted-foreground text-xs leading-snug">{t('clickPromptHelp')}</p>
       </div>
 
