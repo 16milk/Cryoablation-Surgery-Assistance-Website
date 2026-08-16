@@ -8,7 +8,7 @@ export default function getPanelModule() {
       name: 'lungCompareControl',
       iconName: 'layers',
       iconLabel: 'Lung CT compare',
-      label: '肺结节对比',
+      label: 'Lung Nodule Compare',
       component: LungComparePanel,
     },
   ];
