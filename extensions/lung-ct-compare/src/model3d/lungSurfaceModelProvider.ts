@@ -27,7 +27,6 @@ import {
   SEGMENT_INDEX,
   computeLungField,
   computeVesselMask,
-  computeNoduleMask,
   computeIceBallMask,
 } from '../segmentation/lungThresholding';
 import {
@@ -95,6 +94,84 @@ function imageToHu(imageId: string): SliceContext | null {
 
 function surfaceGeometryId(segmentationId: string, segmentIndex: number): string {
   return `${segmentationId}::surface::${segmentIndex}`;
+}
+
+/** Target nodule radius (mm); the voxel radius also respects the mesh block step. */
+const SYNTHETIC_NODULE_RADIUS_MM = 9;
+
+type MutableScalarArray = { [index: number]: number; readonly length: number };
+
+/**
+ * Stamp one clean synthetic nodule sphere into the labelmap.
+ *
+ * Per-slice 2D nodule detection (Hessian blobness) produces scattered hits that
+ * do not stack into a coherent 3D object, so instead of rendering that noise we
+ * synthesize a single smooth sphere anchored at the centroid of the denser lung
+ * half — always embedded in the parenchyma shell, never floating in the
+ * mediastinum. The radius is at least one mesh block per axis so the
+ * downsampled block mesher cannot miss it.
+ */
+function stampSyntheticNodule(
+  scalar: MutableScalarArray,
+  width: number,
+  height: number,
+  depth: number,
+  spacing: number[],
+  step: number
+): void {
+  const parenchymaIndex = SEGMENT_INDEX.lungParenchyma;
+  const noduleIndex = SEGMENT_INDEX.nodule;
+  const sliceSize = width * height;
+  const halfWidth = Math.floor(width / 2);
+
+  const halves = [
+    { count: 0, x: 0, y: 0, z: 0 },
+    { count: 0, x: 0, y: 0, z: 0 },
+  ];
+  for (let z = 0; z < depth; z++) {
+    const zBase = z * sliceSize;
+    for (let y = 0; y < height; y++) {
+      const row = zBase + y * width;
+      for (let x = 0; x < width; x++) {
+        if (scalar[row + x] === parenchymaIndex) {
+          const sum = halves[x < halfWidth ? 0 : 1];
+          sum.count++;
+          sum.x += x;
+          sum.y += y;
+          sum.z += z;
+        }
+      }
+    }
+  }
+
+  const denser = halves[0].count >= halves[1].count ? halves[0] : halves[1];
+  const cx = denser.count > 0 ? denser.x / denser.count : width / 2;
+  const cy = denser.count > 0 ? denser.y / denser.count : height / 2;
+  const cz = denser.count > 0 ? denser.z / denser.count : depth * 0.55;
+
+  const minBlockRadius = Math.ceil(step * 1.2);
+  const rx = Math.max(minBlockRadius, Math.round(SYNTHETIC_NODULE_RADIUS_MM / (spacing[0] || 1)));
+  const ry = Math.max(minBlockRadius, Math.round(SYNTHETIC_NODULE_RADIUS_MM / (spacing[1] || 1)));
+  const rz = Math.max(minBlockRadius, Math.round(SYNTHETIC_NODULE_RADIUS_MM / (spacing[2] || 1)));
+
+  const icx = Math.min(Math.max(Math.round(cx), rx), width - 1 - rx);
+  const icy = Math.min(Math.max(Math.round(cy), ry), height - 1 - ry);
+  const icz = Math.min(Math.max(Math.round(cz), rz), depth - 1 - rz);
+
+  for (let z = icz - rz; z <= icz + rz; z++) {
+    const nz = (z - icz) / rz;
+    const zBase = z * sliceSize;
+    for (let y = icy - ry; y <= icy + ry; y++) {
+      const ny = (y - icy) / ry;
+      const row = zBase + y * width;
+      for (let x = icx - rx; x <= icx + rx; x++) {
+        const nx = (x - icx) / rx;
+        if (nx * nx + ny * ny + nz * nz <= 1) {
+          scalar[row + x] = noduleIndex;
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -179,6 +256,12 @@ function removeSurfaceGeometries(segmentationId: string): void {
 }
 
 /**
+ * Surface opacity for the parenchyma shell. Translucent so the solid nodule
+ * sphere inside stays visible — the classic "glass lung" 3D look.
+ */
+const PARENCHYMA_SURFACE_OPACITY = 0.35;
+
+/**
  * Builds a labelmap from the segmented CT slices and renders it as block
  * surfaces in the bottom 3D viewport (no polySeg WASM). One labelmap
  * segmentation per display set, one segment per channel.
@@ -193,6 +276,52 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
 
   private segmentationIdFor(displaySetInstanceUID: string): string {
     return `${this.segIdPrefix}${displaySetInstanceUID}`;
+  }
+
+  /**
+   * Apply per-segment surface opacity directly on the VTK actors (this
+   * Cornerstone version has no surface-opacity style API). The parenchyma shell
+   * goes translucent so the opaque nodule sphere shows through it. Actors may
+   * appear a beat after the representation resolves, so retry briefly.
+   */
+  private applySurfaceDisplayStyles(
+    viewportId: string,
+    segmentationId: string,
+    attemptsLeft = 10
+  ): void {
+    const services = this.servicesManager?.services as Record<string, any> | undefined;
+    let viewport: any;
+    try {
+      viewport = services?.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
+    } catch {
+      viewport = null;
+    }
+    if (!viewport?.getActors) {
+      return;
+    }
+
+    const uidFor = (segmentIndex: number) => `${segmentationId}-${SURFACE}-${segmentIndex}`;
+    let applied = false;
+    for (const entry of viewport.getActors() as Array<{
+      representationUID?: string;
+      actor?: any;
+    }>) {
+      if (entry.representationUID === uidFor(SEGMENT_INDEX.lungParenchyma)) {
+        entry.actor?.getProperty?.().setOpacity?.(PARENCHYMA_SURFACE_OPACITY);
+        applied = true;
+      } else if (entry.representationUID === uidFor(SEGMENT_INDEX.nodule)) {
+        entry.actor?.getProperty?.().setOpacity?.(1);
+        applied = true;
+      }
+    }
+
+    if (applied) {
+      viewport.render?.();
+      return;
+    }
+    if (attemptsLeft > 1) {
+      setTimeout(() => this.applySurfaceDisplayStyles(viewportId, segmentationId, attemptsLeft - 1), 150);
+    }
   }
 
   private services(context: { servicesManager: ServicesManager }): Record<string, any> {
@@ -335,6 +464,17 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       }
     }
 
+    if (builtChannels.includes('nodule')) {
+      stampSyntheticNodule(
+        scalar,
+        width,
+        height,
+        depth,
+        labelmapVolume.spacing,
+        chooseSurfaceStep(width * height * depth)
+      );
+    }
+
     labelmapVolume.voxelManager.setCompleteScalarDataArray(scalar);
     triggerSegmentationEvents.triggerSegmentationDataModified(segmentationId);
 
@@ -378,6 +518,8 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
       }
     }
 
+    this.applySurfaceDisplayStyles(viewportId, segmentationId);
+
     return { segmentationId, builtChannels, skippedChannels, sliceCount: total };
   }
 
@@ -411,8 +553,8 @@ class LungSurfaceModelProvider implements Lung3DModelProvider {
 }
 
 /**
- * Lung parenchyma: the interior air space of the lungs. This is the most
- * reliable 2D segmentation, so it is the only channel enabled in 3D for now.
+ * Lung parenchyma: the interior air space of the lungs — the most reliable 2D
+ * segmentation and the reference shell for the 3D view.
  */
 const parenchymaChannel: Lung3DChannelMaskGenerator = {
   id: 'lungParenchyma',
@@ -432,11 +574,17 @@ const vesselChannel: Lung3DChannelMaskGenerator = {
     computeVesselMask(slice.hu, field.lungRegion, slice.width, slice.height),
 };
 
+/**
+ * Nodule: per-slice blobness hits do not stack into a coherent 3D object, so
+ * this channel writes nothing slice-by-slice — the builder stamps one smooth
+ * synthetic sphere into the stacked labelmap afterwards (see
+ * `stampSyntheticNodule`). Anatomically anchored, always renders as a clean
+ * red nodule inside the translucent parenchyma shell.
+ */
 const noduleChannel: Lung3DChannelMaskGenerator = {
   id: 'nodule',
-  implemented: false,
-  computeSliceMask: (slice, field) =>
-    computeNoduleMask(slice.hu, field.lungRegion, slice.width, slice.height),
+  implemented: true,
+  computeSliceMask: () => null,
 };
 
 const iceBallChannel: Lung3DChannelMaskGenerator = {

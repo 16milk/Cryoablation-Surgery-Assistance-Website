@@ -127,7 +127,7 @@ export default function LungComparePanel() {
   /** Which 3D channels the user has selected to build. */
   const [model3dSelection, setModel3dSelection] = useState<Record<LungStructureId, boolean>>({
     lungParenchyma: true,
-    nodule: false,
+    nodule: true,
     vessel: false,
     iceBall: false,
   });

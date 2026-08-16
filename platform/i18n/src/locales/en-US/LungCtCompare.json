@@ -37,7 +37,7 @@
   "model3dNeed3dLayout": "Switch to the \"Two stacks + 3D\" layout first, so the bottom 3D viewport exists.",
   "model3dNoSeries": "Select a baseline CT series first.",
   "model3dNoChannel": "Select at least one structure to reconstruct.",
-  "model3dHelp": "Reconstructs the selected structures from the segmented CT slices into a colored 3D surface in the bottom viewport. Only lung parenchyma is enabled for now; vessel / nodule / ice ball channels are reserved and will be added later. Building scans every slice and may take a few seconds.",
+  "model3dHelp": "Reconstructs the selected structures from the segmented CT slices into a colored 3D surface in the bottom viewport. The lung parenchyma renders as a translucent shell with the nodule as a solid red sphere inside it; vessel / ice ball channels are reserved and will be added later. Building scans every slice and may take a few seconds.",
   "baselineLabel": "Baseline (left)",
   "compareLabel": "Compare (right)",
   "selectSeriesPlaceholder": "Select CT series",

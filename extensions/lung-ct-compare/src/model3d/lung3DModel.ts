@@ -14,11 +14,13 @@ import type { LungField } from '../segmentation/lungThresholding';
  * Cornerstone surface-render it in the 3D viewport, one colored surface per
  * channel.
  *
- * Only the lung-parenchyma channel is implemented today (its 2D segmentation is
- * the most reliable). The other three channels are registered as reserved
- * interfaces — wired to their existing 2D mask functions but flagged
- * `implemented: false` so the UI offers them as "coming soon". Enabling one is a
- * single flag flip once its quality is good enough.
+ * Two channels are implemented today: lung parenchyma (its 2D segmentation is
+ * the most reliable) and nodule (synthesized as one smooth sphere anchored in
+ * the lung, since per-slice 2D nodule hits do not stack into a coherent 3D
+ * object). The vessel / ice-ball channels are registered as reserved interfaces
+ * — wired to their existing 2D mask functions but flagged `implemented: false`
+ * so the UI offers them as "coming soon". Enabling one is a single flag flip
+ * once its quality is good enough.
  */
 export interface Lung3DChannelMaskGenerator {
   /** Which structure this channel reconstructs. */
