@@ -1,5 +1,5 @@
 import { LungStructureId, setLungSegmentationProvider } from './lungSegmentation';
-import { computeLungField, computeStructureMask } from './lungThresholding';
+import { LungField, computeLungField, computeStructureMask } from './lungThresholding';
 import { BaseLungSegmentationProvider, SliceContext } from './baseLungSegmentationProvider';
 import { MedSam2Box, encodeHu, medsam2Health, medsam2Segment } from './medsam2Client';
 import { close, connectedComponents, fillHoles, keepComponents, open } from './morphology';
@@ -25,45 +25,23 @@ const MODEL_STRUCTURES: ReadonlySet<LungStructureId> = new Set<LungStructureId>(
   'iceBall',
 ]);
 
-/** Pixels added around the threshold-derived box so the prompt isn't too tight. */
-const BOX_PADDING = 6;
+/**
+ * Auto-refinement ROI sizing. Each threshold candidate is segmented on a
+ * zoomed crop whose half-size follows the candidate's bounding box:
+ *  - `ROI_PADDING`: extra pixels beyond half the bbox so the prompt box isn't
+ *    skin-tight,
+ *  - `MIN/MAX_ROI_HALF`: tiny candidates still get a workable crop; huge ones
+ *    (ice balls) don't need the zoom anyway.
+ */
+const ROI_PADDING = 6;
+const MIN_ROI_HALF = 12;
+const MAX_ROI_HALF = 96;
+
+/** Upper bound on per-slice model calls; excess (smallest) candidates are skipped. */
+const MAX_CANDIDATES_PER_SLICE = 8;
 
 /** Max cached slice masks (per provider) to bound memory during long sessions. */
 const MAX_CACHE = 256;
-
-function boundingBox(mask: Uint8Array, width: number, height: number): MedSam2Box | null {
-  let minX = width;
-  let minY = height;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = 0; y < height; y++) {
-    const row = y * width;
-    for (let x = 0; x < width; x++) {
-      if (mask[row + x]) {
-        if (x < minX) {
-          minX = x;
-        }
-        if (x > maxX) {
-          maxX = x;
-        }
-        if (y < minY) {
-          minY = y;
-        }
-        if (y > maxY) {
-          maxY = y;
-        }
-      }
-    }
-  }
-  if (maxX < 0) {
-    return null;
-  }
-  const x0 = Math.max(0, minX - BOX_PADDING);
-  const y0 = Math.max(0, minY - BOX_PADDING);
-  const x1 = Math.min(width - 1, maxX + BOX_PADDING);
-  const y1 = Math.min(height - 1, maxY + BOX_PADDING);
-  return [x0, y0, x1, y1];
-}
 
 function intersect(mask: Uint8Array, region: Uint8Array): Uint8Array {
   const n = Math.min(mask.length, region.length);
@@ -145,11 +123,14 @@ function keepPromptComponent(
  * Segmentation backend powered by the MedSAM2 foundation model.
  *
  * For each toggled structure on the current slice we:
- *   1. derive a coarse region with the same HU thresholds used by the
- *      threshold backend (this seeds an automatic bounding-box prompt — MedSAM2
- *      is promptable, not a fixed 4-class classifier),
- *   2. send the slice + box to the MedSAM2 service for a refined mask,
- *   3. confine non-parenchyma masks to the lung field to avoid leakage.
+ *   1. derive coarse candidate regions with the same HU/blobness thresholds
+ *      used by the threshold backend (MedSAM2 is promptable, not a fixed
+ *      4-class classifier, so it needs localization),
+ *   2. refine EACH candidate on its own zoomed ROI crop — a whole-slice box
+ *      prompt makes SAM resize the 512² slice to its internal resolution, so a
+ *      small nodule is segmented at very few effective pixels and gets a
+ *      coarse, jagged border; cropping lets the lesion fill the model input,
+ *   3. confine refined masks to the lung field to avoid leakage.
  *
  * If the service is unreachable or has no weights loaded, we transparently fall
  * back to the pure threshold mask, so the UI keeps working with zero setup and
@@ -183,7 +164,6 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
     }
 
     const available = modelActive.length > 0 && (await this.ensureAvailable());
-    const huBase64 = available ? encodeHu(hu) : '';
 
     for (const id of modelActive) {
       const cacheKey = `${imageId}::${id}`;
@@ -201,25 +181,9 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
         continue;
       }
 
-      const box = boundingBox(thresholdMask, width, height);
-      if (!box) {
-        // Nothing of this structure on this slice — empty mask, no model call.
-        out.set(id, new Uint8Array(width * height));
-        continue;
-      }
-
       try {
         // eslint-disable-next-line no-await-in-loop
-        const raw = await medsam2Segment({
-          width,
-          height,
-          huBase64,
-          structure: id,
-          box,
-          window: STRUCTURE_WINDOW[id],
-        });
-        // Model structures (nodule / ice ball) live inside the lung field.
-        const refined = intersect(raw, field.lungRegion);
+        const refined = await this.refineCandidatesViaCrop(slice, id, thresholdMask, field);
         this.put(cacheKey, refined);
         out.set(id, refined);
       } catch {
@@ -229,6 +193,82 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
     }
 
     return out;
+  }
+
+  /**
+   * Refine every threshold candidate of one structure on one slice: each
+   * connected component gets its own crop-based MedSAM2 call (the same zoom
+   * trick as click-to-prompt), and the per-candidate masks are merged. Running
+   * the model per candidate at high effective resolution — instead of once on
+   * the whole slice with a single box around everything — is what makes
+   * small-nodule borders precise.
+   *
+   * Calls run sequentially on purpose: the server-side predictor is stateful
+   * (`set_image` then `predict`), so concurrent requests would race.
+   */
+  private async refineCandidatesViaCrop(
+    slice: SliceContext,
+    structureId: LungStructureId,
+    thresholdMask: Uint8Array,
+    field: LungField
+  ): Promise<Uint8Array> {
+    const { width, height } = slice;
+    const cc = connectedComponents(thresholdMask, width, height);
+    const merged = new Uint8Array(width * height);
+    if (cc.count === 0) {
+      return merged;
+    }
+
+    // Centroids come from the member pixels (not the bbox center) so the
+    // positive point prompt lands on the candidate even for crescent shapes.
+    const sumX = new Float64Array(cc.count + 1);
+    const sumY = new Float64Array(cc.count + 1);
+    for (let i = 0; i < cc.labels.length; i++) {
+      const label = cc.labels[i];
+      if (label) {
+        sumX[label] += i % width;
+        sumY[label] += Math.floor(i / width);
+      }
+    }
+
+    // Largest first when the per-slice model-call budget caps the count.
+    const order: number[] = [];
+    for (let label = 1; label <= cc.count; label++) {
+      order.push(label);
+    }
+    order.sort((a, b) => cc.areas[b] - cc.areas[a]);
+
+    for (const label of order.slice(0, MAX_CANDIDATES_PER_SLICE)) {
+      const [minX, minY, maxX, maxY] = cc.bbox[label];
+      const half = Math.ceil(Math.max(maxX - minX + 1, maxY - minY + 1) / 2) + ROI_PADDING;
+      const roiHalf = Math.max(MIN_ROI_HALF, Math.min(MAX_ROI_HALF, half));
+      const cx = Math.round(sumX[label] / cc.areas[label]);
+      const cy = Math.round(sumY[label] / cc.areas[label]);
+
+      // eslint-disable-next-line no-await-in-loop
+      const part = await this.segmentRegionViaCrop(slice, structureId, [cx, cy], roiHalf, field, [
+        minX,
+        minY,
+        maxX,
+        maxY,
+      ]);
+      if (part) {
+        for (let i = 0; i < part.length; i++) {
+          if (part[i]) {
+            merged[i] = 1;
+          }
+        }
+      } else {
+        // Crop unworkable (e.g. a thin sliver at the image edge): keep the raw
+        // threshold component rather than dropping the candidate entirely.
+        for (let i = 0; i < cc.labels.length; i++) {
+          if (cc.labels[i] === label) {
+            merged[i] = 1;
+          }
+        }
+      }
+    }
+    return merged;
   }
 
   /**
@@ -255,15 +295,32 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
     return super.segmentPointMask(slice, structureId, point);
   }
 
-  /** Crop → zoomed model inference → paste back → confine → smooth. */
+  /** Click path: the ROI size comes from the user-configurable prompt ROI. */
   private async segmentPointViaCrop(
     slice: SliceContext,
     structureId: LungStructureId,
     point: [number, number]
   ): Promise<Uint8Array | null> {
+    const roiHalf = Math.max(MIN_ROI_HALF, Math.round(this.clickPromptRoiSizePx / 2));
+    return this.segmentRegionViaCrop(slice, structureId, point, roiHalf);
+  }
+
+  /**
+   * Crop → zoomed model inference → paste back → confine → smooth.
+   * `promptBox` (full-slice coordinates) lets the auto path pass the
+   * candidate's real bounding box; without it the box is symmetric around
+   * `point` (click path).
+   */
+  private async segmentRegionViaCrop(
+    slice: SliceContext,
+    structureId: LungStructureId,
+    point: [number, number],
+    roiHalf: number,
+    knownField?: LungField,
+    promptBox?: MedSam2Box
+  ): Promise<Uint8Array | null> {
     const { hu, width, height } = slice;
     const [col, row] = point;
-    const roiHalf = Math.max(12, Math.round(this.clickPromptRoiSizePx / 2));
     // Crop a bit wider than the ROI so the model has surrounding context.
     const cropHalf = Math.min(Math.round(roiHalf * 1.4), 180);
     const x0 = Math.max(0, col - cropHalf);
@@ -284,12 +341,19 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
 
     const pcol = col - x0;
     const prow = row - y0;
-    const box: MedSam2Box = [
-      Math.max(0, pcol - roiHalf),
-      Math.max(0, prow - roiHalf),
-      Math.min(cw - 1, pcol + roiHalf),
-      Math.min(ch - 1, prow + roiHalf),
-    ];
+    const box: MedSam2Box = promptBox
+      ? [
+          Math.max(0, promptBox[0] - x0 - ROI_PADDING),
+          Math.max(0, promptBox[1] - y0 - ROI_PADDING),
+          Math.min(cw - 1, promptBox[2] - x0 + ROI_PADDING),
+          Math.min(ch - 1, promptBox[3] - y0 + ROI_PADDING),
+        ]
+      : [
+          Math.max(0, pcol - roiHalf),
+          Math.max(0, prow - roiHalf),
+          Math.min(cw - 1, pcol + roiHalf),
+          Math.min(ch - 1, prow + roiHalf),
+        ];
 
     try {
       const cropMask = await medsam2Segment({
@@ -313,7 +377,7 @@ class MedSam2LungSegmentationProvider extends BaseLungSegmentationProvider {
         }
       }
 
-      const field = computeLungField(hu, width, height);
+      const field = knownField ?? computeLungField(hu, width, height);
       const confined = intersect(full, field.lungRegion);
       const smoothed = smoothMask(confined, width, height);
       // A full ROI disc is the upper bound on a believable single lesion.
