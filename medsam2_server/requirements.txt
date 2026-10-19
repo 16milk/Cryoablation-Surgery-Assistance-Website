@@ -2,13 +2,17 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 numpy>=1.24
+scipy>=1.10
 pydantic>=2.0
 
-# PyTorch and SAM2/MedSAM2 are intentionally NOT pinned here because they are
-# platform/GPU specific and large. Install them separately, e.g.:
+# Python 3.10+ is required by MedSAM2. PyTorch and SAM2/MedSAM2 are intentionally
+# NOT pinned here because they are platform/GPU specific and large. Install
+# them separately, e.g.:
 #
 #   pip install torch torchvision            # pick the right build for your CUDA/MPS/CPU
-#   pip install "git+https://github.com/facebookresearch/sam2.git"
+#   git clone https://github.com/bowang-lab/MedSAM2.git /path/to/MedSAM2
+#   pip install -e /path/to/MedSAM2
 #
-# Then download a MedSAM2 checkpoint and set the environment variables
+# Do not install upstream SAM2 in place of the MedSAM2 fork: this service uses
+# its NPZ video predictor API. Then download a MedSAM2 checkpoint and set:
 # MEDSAM2_CHECKPOINT and MEDSAM2_CONFIG (see README.md).
